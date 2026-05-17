@@ -634,11 +634,11 @@ with tab4:
     # --- Espacio en disco ---
     st.subheader("💾 Espacio en disco")
 
-    def _dir_mb(path: Path) -> float:
-        return sum(f.stat().st_size for f in path.rglob("*") if f.is_file()) / 1024 / 1024
+    def _dir_mb(path: Path, pattern: str = "*") -> float:
+        return sum(f.stat().st_size for f in path.rglob(pattern) if f.is_file()) / 1024 / 1024
 
-    raw_mb    = _dir_mb(raw_dir)
-    bronze_mb = _dir_mb(bronze_dir)
+    raw_mb    = _dir_mb(raw_dir, "*.pb")
+    bronze_mb = _dir_mb(bronze_dir, "*.parquet")
     gtfs_mb   = _dir_mb(raw_dir / "gtfs_static") if (raw_dir / "gtfs_static").exists() else 0.0
     total_mb  = raw_mb + bronze_mb
 
