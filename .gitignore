@@ -30,3 +30,6 @@ logs/
 # Secretos / config local
 .env
 config.local.yaml
+
+# Memoria de Claude Code
+.claude/

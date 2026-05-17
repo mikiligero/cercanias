@@ -138,14 +138,21 @@ def delays_by_trip(
     """).df()
 
 
-def punctuality_over_time(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+def punctuality_over_time(
+    con: duckdb.DuckDBPyConnection,
+    start_ts: int | None = None,
+    end_ts: int | None = None,
+) -> pd.DataFrame:
     """
     Serie temporal de puntualidad: una fila por snapshot.
-    Columnas: hora, trenes, pct_puntual, retraso_medio_min.
+    Columnas: ts (timestamp), trenes, pct_puntual, retraso_medio_min.
     """
-    return con.execute("""
+    ts_filter = ""
+    if start_ts is not None and end_ts is not None:
+        ts_filter = f"AND snapshot_ts BETWEEN {start_ts} AND {end_ts}"
+    return con.execute(f"""
         SELECT
-            strftime(to_timestamp(snapshot_ts), '%H:%M:%S') AS hora,
+            to_timestamp(snapshot_ts)                        AS ts,
             count(*)                                         AS trenes,
             round(100.0 * sum(CASE WHEN arrival_delay <= 0
                                    THEN 1 ELSE 0 END)
@@ -153,6 +160,7 @@ def punctuality_over_time(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
             round(avg(arrival_delay) / 60.0, 1)             AS retraso_medio_min
         FROM trip_updates
         WHERE arrival_delay IS NOT NULL
+          {ts_filter}
         GROUP BY snapshot_ts
         ORDER BY snapshot_ts
     """).df()
@@ -177,13 +185,20 @@ def active_alerts(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     """).df()
 
 
-def network_heatmap(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+def network_heatmap(
+    con: duckdb.DuckDBPyConnection,
+    start_ts: int | None = None,
+    end_ts: int | None = None,
+) -> pd.DataFrame:
     """
-    Retraso medio por parada a lo largo de todo el histórico acumulado.
+    Retraso medio por parada a lo largo del período seleccionado.
     Útil para identificar los puntos negros de la red.
     Devuelve: stop_name, stop_lat, stop_lon, n_observaciones, retraso_medio_min.
     """
-    return con.execute("""
+    ts_filter = ""
+    if start_ts is not None and end_ts is not None:
+        ts_filter = f"AND tu.snapshot_ts BETWEEN {start_ts} AND {end_ts}"
+    return con.execute(f"""
         SELECT
             s.stop_name,
             CAST(s.stop_lat AS DOUBLE) AS lat,
@@ -193,6 +208,7 @@ def network_heatmap(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
         FROM trip_updates tu
         JOIN stops s ON tu.stop_id = s.stop_id
         WHERE tu.arrival_delay IS NOT NULL
+          {ts_filter}
         GROUP BY s.stop_name, s.stop_lat, s.stop_lon
         HAVING count(*) >= 3
         ORDER BY retraso_medio_min DESC
