@@ -1,0 +1,17 @@
+[Unit]
+Description=Cercanías Renfe — Dashboard Streamlit
+After=network-online.target cercanias-pipeline.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/cercanias
+ExecStart=/root/cercanias/venv/bin/streamlit run dashboard.py --server.headless true --server.port 8501
+Restart=on-failure
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
