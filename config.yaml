@@ -1,0 +1,50 @@
+# Configuración del pipeline de ingesta Renfe Open Data
+
+feeds:
+  vehicle_positions:
+    url: "https://gtfsrt.renfe.com/vehicle_positions.pb"
+    interval_seconds: 30
+  trip_updates:
+    url: "https://gtfsrt.renfe.com/trip_updates.pb"
+    interval_seconds: 30
+  alerts:
+    url: "https://gtfsrt.renfe.com/alerts.pb"
+    interval_seconds: 30
+
+gtfs_static:
+  url: "https://ssl.renfe.com/ftransit/Fichero_CER_FOMENTO/fomento_transit.zip"
+
+stations:
+  # Un CSV por núcleo de Cercanías — se descargan una vez como referencia estática
+  - name: madrid
+    url: "https://data.renfe.com/dataset/0b763a1a-860d-4346-8818-765d2559248f/resource/daa68d9b-77cf-4024-890f-285d31184c5a/download/listado-estaciones-cercanias-madrid.csv"
+  - name: barcelona
+    url: "https://data.renfe.com/dataset/8bdd06a5-f7f6-4f21-9cb6-b76f39842726/resource/e3969f12-aff2-468e-9b82-a65a6dd1a0d3/download/listado-estaciones-rodalies-barcelona.csv"
+  - name: valencia
+    url: "https://data.renfe.com/dataset/b5a039a1-4f02-4f9c-b617-a94d55779647/resource/0b1caf38-e6a9-4965-a94d-9a24c5a4ae84/download/listado-estaciones-cercanias-valencia.csv"
+  - name: sevilla
+    url: "https://data.renfe.com/dataset/d13549fe-f132-4633-aa50-5ed70b2f71dd/resource/ac3b4229-1c69-412f-a6de-29df913ece92/download/listado-estaciones-cercanias-sevilla.csv"
+  - name: bilbao
+    url: "https://data.renfe.com/dataset/0356d125-ddd2-4db2-9f10-3083c91f3e2a/resource/3254a1ed-a2b7-4fd1-9e9e-23eefe35f162/download/listado-estaciones-cercanias-bilbao.csv"
+  - name: murcia_alicante
+    url: "https://data.renfe.com/dataset/9b7b24d0-57d0-489c-bcd6-cb78e96135e1/resource/1d17b744-4c68-4578-bdc3-b51457892967/download/listado-estaciones-cercanias-murcia-alicante.csv"
+  - name: zaragoza
+    url: "https://data.renfe.com/dataset/479fa2dd-76e0-4a97-ac88-b848943f9133/resource/9651ce18-9437-4274-ad04-143f1cc9e6db/download/listado-estaciones-cercanias-zaragoza_2.csv"
+  - name: malaga
+    url: "https://data.renfe.com/dataset/9cd08424-f617-4adb-a230-68abdb2c8abf/resource/4b651d25-3fed-4f6a-be4d-18352d7e2aea/download/listado-estaciones-cercanias-malaga-v4.csv"
+  - name: asturias
+    url: "https://data.renfe.com/dataset/a94a67b4-c353-417c-b471-284998bc257d/resource/6b73014a-e5bd-4b0e-b17b-1f8abe47a90f/download/listado-estaciones-cercanias-asturias.csv"
+  - name: cadiz
+    url: "https://data.renfe.com/dataset/d2197774-6671-45a7-ad3b-eadac1b66475/resource/2c3afbbd-30f6-41b1-815a-6ef452457f92/download/cercanias-cadiz-.csv"
+  - name: santander
+    url: "https://data.renfe.com/dataset/aa5cf888-f8b9-4824-b60a-7ae3ba6ec32b/resource/18dd8342-b68e-4846-9e52-1a96faf85e80/download/listado-estaciones-cercanias-santander.csv"
+  - name: san_sebastian
+    url: "https://data.renfe.com/dataset/f3dc3712-cc1e-4b23-ada0-50562e9cf38b/resource/e8e8d882-865e-4032-8d39-d60cd0cfcdff/download/listado-estaciones-cercanias-san-sebastian.csv"
+
+storage:
+  raw_dir: "data/raw"
+  bronze_dir: "data/bronze"
+
+http:
+  timeout_seconds: 15
+  user_agent: "renfe-gtfs-pilot/0.1 (TFM EOI)"

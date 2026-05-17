@@ -1,0 +1,32 @@
+# Entorno virtual
+venv/
+.venv/
+env/
+
+# Datos — no versionar (pueden ser grandes)
+data/raw/
+data/bronze/
+data/silver/
+data/gold/
+
+# Caché Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Secretos / config local
+.env
+config.local.yaml
