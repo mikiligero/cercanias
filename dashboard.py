@@ -5,6 +5,7 @@ Refresco automático cada 30 s (sincronizado con el ciclo del feed).
 Arranca con:
     streamlit run dashboard.py
 """
+import shutil
 import time
 import zipfile
 from datetime import date, datetime, timedelta, timezone
@@ -629,6 +630,33 @@ with tab4:
         })
 
     st.dataframe(pd.DataFrame(rows_pipe), use_container_width=True, hide_index=True)
+
+    # --- Espacio en disco ---
+    st.subheader("💾 Espacio en disco")
+
+    def _dir_mb(path: Path) -> float:
+        return sum(f.stat().st_size for f in path.rglob("*") if f.is_file()) / 1024 / 1024
+
+    raw_mb    = _dir_mb(raw_dir)
+    bronze_mb = _dir_mb(bronze_dir)
+    gtfs_mb   = _dir_mb(raw_dir / "gtfs_static") if (raw_dir / "gtfs_static").exists() else 0.0
+    total_mb  = raw_mb + bronze_mb
+
+    disk      = shutil.disk_usage(raw_dir)
+    disk_used_gb  = disk.used  / 1024 ** 3
+    disk_total_gb = disk.total / 1024 ** 3
+    disk_free_gb  = disk.free  / 1024 ** 3
+    pct_used      = disk.used / disk.total
+
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("Raw (.pb)",         f"{raw_mb:.1f} MB")
+    d2.metric("Bronze (Parquet)",  f"{bronze_mb:.1f} MB")
+    d3.metric("GTFS estático",     f"{gtfs_mb:.1f} MB")
+    d4.metric("Total datos",       f"{total_mb:.1f} MB")
+
+    st.progress(pct_used, text=f"Disco: {disk_used_gb:.1f} GB usados / {disk_total_gb:.1f} GB total — {disk_free_gb:.1f} GB libres")
+
+    st.divider()
 
     vp_pbs = sorted((raw_dir / "vehicle_positions").rglob("*.pb"))
     if vp_pbs:
