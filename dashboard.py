@@ -640,7 +640,7 @@ with tab4:
     raw_mb    = _dir_mb(raw_dir, "*.pb")
     bronze_mb = _dir_mb(bronze_dir, "*.parquet")
     gtfs_mb   = _dir_mb(raw_dir / "gtfs_static") if (raw_dir / "gtfs_static").exists() else 0.0
-    total_mb  = raw_mb + bronze_mb
+    total_mb  = raw_mb + bronze_mb + gtfs_mb
 
     disk      = shutil.disk_usage(raw_dir)
     disk_used_gb  = disk.used  / 1024 ** 3
