@@ -21,6 +21,7 @@ from src.query import (FILTER_DESCRIPTION, snapshot_summary, delay_audit, delays
 
 VIEWS = ['📊 El piloto en cifras', '🔎 Del dato al indicador', '🔴 Red en vivo',
          '🗺️ Por núcleo', '📈 Tendencia del día', '⚙️ Sistema y calidad']
+LOGO = Path(__file__).resolve().parent/'assets/logo-anticipa.png'
 st.set_page_config(page_title='Anticipa · Cuadro de mando (prototipo)', page_icon='🚆', layout='wide')
 
 
@@ -229,7 +230,12 @@ def _trend(con, gtfs, ncode, start, end, preset):
 
 if st.session_state.get('selected_view') == '⚙️ Sistema':
     st.session_state['selected_view'] = '⚙️ Sistema y calidad'
-st.title('🚆 Anticipa · Cercanías Renfe')
+brand,heading=st.columns([1,7],vertical_alignment='center')
+with brand:
+    st.image(str(LOGO),width=110)
+with heading:
+    st.title('Cercanías Renfe')
+    st.caption('Cuadro de mando del piloto Anticipa')
 selected_view = st.radio('Vista', VIEWS, horizontal=True, label_visibility='collapsed', key='selected_view')
 cfg = _load_cfg()
 analytical = selected_view in VIEWS[2:5]
