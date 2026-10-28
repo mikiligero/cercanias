@@ -10,12 +10,13 @@ def test_page_selection_and_installation_instructions(tmp_path):
     with patch.dict(os.environ,{'ANTICIPA_DOWNLOADS_ENABLED':'1'}):
         app=AppTest.from_string(f'from src.download_view import render_downloads\nrender_downloads({cfg!r})').run()
         assert not app.exception
-        assert any(m.label=='Días con archivos' and m.value=='1' for m in app.metric)
-        assert any('Dónde colocar' in title.value for title in app.subheader)
+        assert len(app.radio)==1 and len(app.date_input)==1
+        assert len(app.dataframe)==0 and len(app.selectbox)==0
+        assert any('Dónde colocar' in element.label for element in app.expander)
         assert any('data/' in code.value for code in app.code)
-        app.selectbox(key='downloads_period').set_value('Elegir fechas').run()
+        app.radio(key='download_format_simple').set_value('Ambos').run()
         assert not app.exception
-        app.multiselect(key='downloads_formats').set_value([]).run()
+        app.multiselect(key='download_sources_simple').set_value([]).run()
         assert not app.exception and any('al menos' in info.value for info in app.info)
 
 

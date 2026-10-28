@@ -4,13 +4,16 @@ from datetime import date, datetime, timezone
 import hashlib
 import json
 import os
+import pickle
 from pathlib import Path
 import re
 import stat
 import threading
+import tempfile
 import time
 from urllib.parse import urlencode
 import zipfile
+from itertools import chain
 
 FEEDS = ('vehicle_positions', 'trip_updates', 'alerts')
 FORMATS = ('raw', 'parquet')
@@ -20,6 +23,7 @@ ENDPOINT = '/_anticipa/datos'
 MAX_FILES = 40000
 MAX_BYTES = 2 * 1024**3
 CHUNK_SIZE = 64 * 1024
+INDEX_MEMORY_LIMIT = 2 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -129,6 +133,86 @@ def download_url(day=None, formats=(), feeds=(), kind='day', base=''):
     return base.rstrip('/')+ENDPOINT+'?'+urlencode(params)
 
 
+def period_url(start,end,formats,feeds,include_gtfs=True,base=''):
+    formats,feeds=validate_selection(start,formats,feeds)
+    validate_selection(end,formats,feeds)
+    if start>end:
+        raise SelectionError('La fecha inicial debe ser anterior o igual a la final.')
+    return base.rstrip('/')+ENDPOINT+'?'+urlencode(dict(kind='period',start=start,end=end,
+        formats=','.join(formats),feeds=','.join(feeds),gtfs=int(include_gtfs)))
+
+
+def period_name(start,end,formats,feeds):
+    validate_selection(end,formats,feeds)
+    name=archive_name(start,formats,feeds)
+    return name.replace(start,start+'_a_'+end,1) if start!=end else name
+
+
+def select_period(cfg,start,end,formats,feeds,include_gtfs=True,cutoff=None):
+    """Recorre una partición cada vez; no carga la lista del histórico en memoria."""
+    formats,feeds=validate_selection(start,formats,feeds)
+    validate_selection(end,formats,feeds)
+    if start>end:
+        raise SelectionError('La fecha inicial debe ser anterior o igual a la final.')
+    cutoff=time.time()-5 if cutoff is None else cutoff
+    stats={'skipped_unstable':0}
+    def entries():
+        for fmt in formats:
+            root=Path(cfg['storage']['raw_dir' if fmt=='raw' else 'bronze_dir'])
+            for feed in feeds:
+                folder_root=root/feed
+                if not folder_root.exists():continue
+                pattern=re.compile((re.escape(feed)+'_' if fmt=='raw' else 'part-')+r'\d{8}T\d{6}Z\.'+('pb' if fmt=='raw' else 'parquet'))
+                for folder in sorted(folder_root.iterdir()):
+                    day=folder.name if fmt=='raw' else folder.name.removeprefix('date=')
+                    if not start<=day<=end or (fmt=='parquet' and not folder.name.startswith('date=')):
+                        continue
+                    try:date.fromisoformat(day)
+                    except ValueError:continue
+                    if not folder.is_dir():continue
+                    if not folder.resolve().is_relative_to(root.resolve()):
+                        raise SelectionError('La carpeta no pertenece al conjunto publicado.')
+                    for entry in sorted(os.scandir(folder),key=lambda entry:entry.name):
+                        if not pattern.fullmatch(entry.name) or not entry.is_file(follow_symlinks=False):continue
+                        path=Path(entry.path)
+                        name='data/'+('raw' if fmt=='raw' else 'bronze')+'/'+feed+'/'+folder.name+'/'+path.name
+                        try:item=_file(path,root,name,cutoff)
+                        except FileNotFoundError:item=None
+                        if item:yield item
+                        else:stats['skipped_unstable']+=1
+    iterator=entries()
+    try:first=next(iterator)
+    except StopIteration:
+        raise FileNotFoundError('No hay archivos estables disponibles para este período.') from None
+    references=[]
+    if include_gtfs:
+        try:references=select_files(cfg,kind='gtfs',cutoff=cutoff)['files']
+        except FileNotFoundError:pass
+    return dict(kind='period',start=start,end=end,formats=list(formats),feeds=list(feeds),
+                files=chain(references,[first],iterator),stats=stats,include_gtfs=bool(references),
+                cutoff_utc=datetime.fromtimestamp(cutoff,timezone.utc).isoformat(),
+                selected_at=datetime.now(timezone.utc).isoformat(),stream_index=True)
+
+
+class _DiskIndex:
+    """Índice de ZipInfo compatible con ZipFile de Python 3.12, respaldado por disco.
+
+    ZipFile escribe la central al finalizar. Solo necesita append, len e iteración
+    para ello; no se retienen millones de ZipInfo en RAM. El pickle se genera y
+    consume dentro de esta descarga, nunca procede de archivos del usuario.
+    """
+    def __init__(self):
+        self.file=tempfile.SpooledTemporaryFile(max_size=INDEX_MEMORY_LIMIT,mode='w+b')
+        self.count=0
+    def append(self,item):
+        pickle.dump(item,self.file,protocol=pickle.HIGHEST_PROTOCOL);self.count+=1
+    def __len__(self):return self.count
+    def __iter__(self):
+        self.file.seek(0)
+        for _ in range(self.count):yield pickle.load(self.file)
+    def close(self):self.file.close()
+
+
 def _readme(plan):
     return '''# Datos del piloto Anticipa
 
@@ -177,12 +261,19 @@ Los mensajes originales pueden estar vacíos o contener anomalías. La descarga 
 
 
 def write_archive(plan, output, cancelled=None):
-    """Memoria acotada: copia en bloques y escribe el índice de una sola jornada."""
+    """Un ZIP de cualquier período; datos e índices se escriben con memoria acotada."""
     cancelled=cancelled or threading.Event()
-    manifest={k:v for k,v in plan.items() if k!='files'}
-    manifest.update(version=1,timezone='UTC',files=[],filter_applied=False)
-    with zipfile.ZipFile(output,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=1,allowZip64=True) as archive:
+    manifest={k:v for k,v in plan.items() if k not in ('files','stats','stream_index')}
+    manifest.update(version=2,timezone='UTC',filter_applied=False)
+    details=[] if not plan.get('stream_index') else None
+    index=_DiskIndex()
+    records=tempfile.SpooledTemporaryFile(max_size=INDEX_MEMORY_LIMIT,mode='w+b')
+    count=total=0
+    try:
+      with zipfile.ZipFile(output,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=1,allowZip64=True) as archive:
+        archive.filelist=index
         archive.writestr('LEEME-DATOS.md',_readme(plan))
+        archive.NameToInfo.clear()
         for item in plan['files']:
             if cancelled.is_set():
                 raise InterruptedError('Descarga cancelada')
@@ -190,7 +281,7 @@ def write_archive(plan, output, cancelled=None):
             with os.fdopen(fd,'rb') as source:
                 before=os.fstat(source.fileno())
                 if (before.st_size,before.st_mtime_ns,before.st_ino)!=(item.size,item.mtime_ns,item.inode):
-                    raise RuntimeError('Un archivo ha cambiado. Repite la descarga de este día.')
+                    raise RuntimeError('Un archivo ha cambiado. Repite la descarga.')
                 digest=hashlib.sha256();size=0
                 stamp=datetime.fromtimestamp(max(before.st_mtime,315532800),timezone.utc)
                 info=zipfile.ZipInfo(item.archive_path,stamp.timetuple()[:6])
@@ -206,11 +297,25 @@ def write_archive(plan, output, cancelled=None):
                 after=os.fstat(source.fileno())
                 if (size,after.st_size,after.st_mtime_ns,after.st_ino)!=(item.size,item.size,item.mtime_ns,item.inode):
                     raise RuntimeError('Un archivo ha cambiado durante la descarga.')
-                manifest['files'].append(dict(path=item.archive_path,size=size,sha256=digest.hexdigest(),
-                    modified_utc=datetime.fromtimestamp(before.st_mtime,timezone.utc).isoformat()))
+                record=dict(path=item.archive_path,size=size,sha256=digest.hexdigest(),
+                    modified_utc=datetime.fromtimestamp(before.st_mtime,timezone.utc).isoformat())
+                if count:records.write(b',')
+                records.write(json.dumps(record,ensure_ascii=False).encode('utf-8'))
+                if details is not None:details.append(record)
+                count+=1;total+=size
+                archive.NameToInfo.clear()
         manifest['completed_at']=datetime.now(timezone.utc).isoformat()
-        archive.writestr('manifest.json',json.dumps(manifest,ensure_ascii=False,indent=2))
-    return manifest
+        manifest.update(file_count=count,source_bytes=total)
+        if 'stats' in plan:manifest.update(plan['stats'])
+        records.seek(0)
+        with archive.open('manifest.json','w',force_zip64=True) as destination:
+            destination.write(json.dumps(manifest,ensure_ascii=False).encode('utf-8')[:-1]+b',"files":[')
+            while chunk:=records.read(CHUNK_SIZE):destination.write(chunk)
+            destination.write(b']}')
+        archive.NameToInfo.clear()
+      return dict(manifest,files=details) if details is not None else manifest
+    finally:
+        index.close();records.close()
 
 
 def downloader_script(days,formats,feeds,include_gtfs=False,base=PUBLIC_BASE):

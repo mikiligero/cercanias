@@ -7,7 +7,7 @@ from pathlib import Path
 import zipfile
 import pytest
 from src.data_downloads import (select_files,write_archive,SelectionError,download_url,
-                               archive_name,downloader_script)
+                               archive_name,downloader_script,select_period,period_url)
 from src.download_view import export_rows
 from reprocess_downloads import reprocess
 
@@ -100,3 +100,55 @@ def test_local_reprocessing_keeps_source_and_skips_existing(tmp_path,tu_pb):
     second=reprocess(cfg,'trip_updates','2026-05-17','2026-05-17')
     assert first['created']==1 and second['existing']==1 and second['created']==0
     assert source.read_bytes()==content
+
+
+def seed_period(tmp_path):
+    cfg,paths=seed(tmp_path)
+    for day in ('2026-10-26','2026-10-28'):
+        folder=tmp_path/'raw/trip_updates'/day;folder.mkdir()
+        file=folder/('trip_updates_'+day.replace('-','')+'T120000Z.pb')
+        file.write_bytes(day.encode());os.utime(file,(1793000000,1793000000))
+    return cfg
+
+
+def test_multiple_days_share_one_zip_with_bounded_indexes(tmp_path,monkeypatch):
+    cfg=seed_period(tmp_path)
+    static=tmp_path/'raw/gtfs_static';static.mkdir()
+    gtfs=static/'fomento_transit.zip';gtfs.write_bytes(b'GTFS');os.utime(gtfs,(1793000000,1793000000))
+    monkeypatch.setattr('src.data_downloads.INDEX_MEMORY_LIMIT',100)
+    plan=select_period(cfg,'2026-10-26','2026-10-27',['raw'],['trip_updates'],True)
+    assert not isinstance(plan['files'],list)
+    output=BytesIO();result=write_archive(plan,output)
+    with zipfile.ZipFile(BytesIO(output.getvalue())) as archive:
+        assert archive.testzip() is None
+        manifest=json.loads(archive.read('manifest.json'))
+        assert manifest['start']=='2026-10-26' and manifest['end']=='2026-10-27'
+        assert len(manifest['files'])==3 and result['file_count']==3
+        names=[r['path'] for r in manifest['files']]
+        assert sum('gtfs_static' in name for name in names)==1
+        assert not any('2026-10-28' in name for name in names)
+        assert any('2026-10-26' in name for name in names) and any('2026-10-27' in name for name in names)
+        assert all(hashlib.sha256(archive.read(r['path'])).hexdigest()==r['sha256'] for r in manifest['files'])
+
+
+def test_period_dates_and_optional_reference(tmp_path):
+    cfg=seed_period(tmp_path)
+    with pytest.raises(SelectionError):select_period(cfg,'2026-10-28','2026-10-26',['raw'],['trip_updates'])
+    with pytest.raises(SelectionError):select_period(cfg,'../etc','2026-10-26',['raw'],['trip_updates'])
+    with pytest.raises(FileNotFoundError):select_period(cfg,'2020-01-01','2020-01-02',['raw'],['trip_updates'])
+    assert 'kind=period' in period_url('2026-10-26','2026-10-27',['raw'],['trip_updates'],False)
+
+
+def test_disk_index_supports_zip64_file_counts():
+    from src.data_downloads import _DiskIndex
+    output=BytesIO();index=_DiskIndex()
+    try:
+        with zipfile.ZipFile(output,'w',allowZip64=True) as archive:
+            archive.filelist=index
+            for n in range(66000):
+                archive.writestr(f'data/test/{n}.pb',b'')
+                archive.NameToInfo.clear()
+        with zipfile.ZipFile(BytesIO(output.getvalue())) as archive:
+            assert len(archive.infolist())==66000
+            assert archive.read('data/test/65999.pb')==b''
+    finally:index.close()

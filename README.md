@@ -69,9 +69,9 @@ La captura inicial prepara las fuentes estáticas. El dashboard necesita archivo
 
 La barra lateral incluye «Descargar datos». También se accede desde el menú de los tres puntos → About → Descargar datos almacenados, o desde [la página de descargas](https://cercanias.mikines.es/?pagina=descargas).
 
-Se eligen bruto `.pb`, Parquet o ambos, las fuentes y un período en fechas UTC. Los paquetes se organizan por día y conservan las rutas `data/raw/…` y `data/bronze/…`. Cada ZIP incluye instrucciones y un manifiesto de tamaños y SHA-256. El GTFS estático se descarga aparte como referencia disponible, sin atribuirlo a versiones históricas. Para varios días se ofrece un programa opcional de descarga secuencial.
+Se eligen el formato (bruto `.pb`, Parquet o ambos) y las fechas UTC. Un único botón descarga **todo el período en un ZIP**, conservando las rutas `data/raw/…` y `data/bronze/…`. Por defecto se incluyen todas las fuentes y una sola copia del GTFS disponible. Las fuentes y la referencia se pueden ajustar en un apartado desplegable. El ZIP incluye las instrucciones y un manifiesto de tamaños y SHA-256.
 
-Descomprime los paquetes en la carpeta del proyecto, junto a `dashboard.py`, combinando sus carpetas `data/`. La guía [DESCARGAR_DATOS.md](DESCARGAR_DATOS.md) explica la estructura y el reprocesado local del bruto. Los paquetes contienen las fuentes completas conservadas, sin filtrar Madrid ni aplicar el filtro analítico de retrasos.
+Descomprime el ZIP en la carpeta del proyecto, junto a `dashboard.py`, conservando `data/`. La guía [DESCARGAR_DATOS.md](DESCARGAR_DATOS.md) explica la estructura y el reprocesado local del bruto. Se descargan las fuentes completas conservadas, sin filtrar Madrid ni aplicar el filtro analítico de retrasos. La fecha del GTFS disponible puede ser posterior al período elegido.
 
 `serve_dashboard.py` sirve las descargas por el mismo puerto del panel, sin duplicar el histórico en disco ni cargar ZIP enteros en memoria. Conserva las rutas de Streamlit y sus WebSockets. El arranque directo `streamlit run dashboard.py` mantiene el cuadro, pero no habilita el endpoint de descarga de conjuntos.
 

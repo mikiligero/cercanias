@@ -9,8 +9,8 @@ import zipfile
 import tornado.web
 from tornado.testing import AsyncHTTPTestCase,gen_test
 from src.download_server import register_download_routes,_slots
-from src.data_downloads import download_url
-from tests.test_data_downloads import seed
+from src.data_downloads import download_url,period_url
+from tests.test_data_downloads import seed_period
 
 
 class Health(tornado.web.RequestHandler):
@@ -20,7 +20,7 @@ class Health(tornado.web.RequestHandler):
 class TestDownloadHTTP(AsyncHTTPTestCase):
     def get_app(self):
         self.folder=tempfile.TemporaryDirectory()
-        self.cfg,_=seed(Path(self.folder.name))
+        self.cfg=seed_period(Path(self.folder.name))
         app=tornado.web.Application([(r'/health',Health)])
         register_download_routes(app,self.cfg)
         return app
@@ -41,6 +41,16 @@ class TestDownloadHTTP(AsyncHTTPTestCase):
         assert self.fetch('/_anticipa/datos?kind=day&day=../../etc').code==400
         assert self.fetch(download_url('2026-10-26',['raw'],['alerts'])).code==404
         assert self.fetch('/_anticipa/datos?kind=secret').code==400
+
+    def test_period_download_contains_both_days_and_not_the_next(self):
+        response=self.fetch(period_url('2026-10-26','2026-10-27',['raw'],['trip_updates'],False))
+        assert response.code==200 and '2026-10-26_a_2026-10-27' in response.headers['Content-Disposition']
+        with zipfile.ZipFile(BytesIO(response.body)) as archive:
+            assert archive.testzip() is None
+            manifest=json.loads(archive.read('manifest.json'))
+            assert len(manifest['files'])==2
+            assert not any('2026-10-28' in item['path'] for item in manifest['files'])
+        assert self.fetch('/_anticipa/datos?kind=period&start=../etc&end=2026-10-28&formats=raw&feeds=alerts').code==400
 
     def test_concurrency_limit_does_not_queue_unbounded_exports(self):
         assert _slots.acquire(False) and _slots.acquire(False)

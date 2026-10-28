@@ -7,7 +7,8 @@ import queue
 import threading
 import tornado.iostream
 import tornado.web
-from src.data_downloads import CHUNK_SIZE,ENDPOINT,SelectionError,archive_name,select_files,write_archive
+from src.data_downloads import (CHUNK_SIZE,ENDPOINT,SelectionError,archive_name,select_files,
+                                select_period,period_name,write_archive)
 
 logger=logging.getLogger(__name__)
 _workers=ThreadPoolExecutor(max_workers=2,thread_name_prefix='anticipa-export')
@@ -42,7 +43,8 @@ def push(chunks,item,cancelled):
 
 def produce(plan,chunks,cancelled):
     try:
-        write_archive(plan,QueueWriter(chunks,cancelled),cancelled)
+        with io.BufferedWriter(QueueWriter(chunks,cancelled),buffer_size=CHUNK_SIZE) as output:
+            write_archive(plan,output,cancelled)
         push(chunks,_END,cancelled)
     except Exception as exc:
         if not cancelled.is_set():
@@ -75,8 +77,17 @@ class DatasetDownloadHandler(tornado.web.RequestHandler):
         try:
             loop=asyncio.get_running_loop()
             try:
-                plan=await loop.run_in_executor(_workers,lambda:select_files(self.cfg,day,formats,feeds,kind))
-                filename=archive_name(day,formats,feeds,kind)
+                if kind=='period':
+                    start=self.get_query_argument('start',None)
+                    end=self.get_query_argument('end',None)
+                    reference=self.get_query_argument('gtfs','1')
+                    if reference not in ('0','1'):
+                        raise SelectionError('La opción GTFS debe ser 0 o 1.')
+                    plan=await loop.run_in_executor(_workers,lambda:select_period(self.cfg,start,end,formats,feeds,reference=='1'))
+                    filename=period_name(start,end,formats,feeds)
+                else:
+                    plan=await loop.run_in_executor(_workers,lambda:select_files(self.cfg,day,formats,feeds,kind))
+                    filename=archive_name(day,formats,feeds,kind)
             except SelectionError as exc:
                 raise tornado.web.HTTPError(400,reason=str(exc)) from None
             except FileNotFoundError as exc:
