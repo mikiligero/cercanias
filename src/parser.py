@@ -192,7 +192,17 @@ def write_parquet(df: pd.DataFrame, bronze_dir: Path, feed_name: str) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     out_path = out_dir / f"part-{ts_str}.parquet"
-    df.to_parquet(out_path, engine="pyarrow", compression="snappy", index=False)
+    import os
+    import tempfile
+
+    fd, temporary = tempfile.mkstemp(prefix=".part-", suffix=".tmp", dir=out_dir)
+    os.close(fd)
+    try:
+        df.to_parquet(temporary, engine="pyarrow", compression="snappy", index=False)
+        os.replace(temporary, out_path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
     logger.info("[%s] parquet → %s (%d filas)", feed_name, out_path.name, len(df))
     return out_path

@@ -33,3 +33,7 @@ config.local.yaml
 
 # Memoria de Claude Code
 .claude/
+
+# Datos generados y copias de recuperación
+/data/
+/feeds_perdidos.csv
