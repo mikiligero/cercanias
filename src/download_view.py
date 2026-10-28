@@ -9,6 +9,19 @@ from src.pilot_view import _size
 
 FORMATS={'Parquet':['parquet'],'Bruto (.pb)':['raw'],'Ambos':['raw','parquet']}
 SOURCES={'Posiciones':'vehicle_positions','Actualizaciones de viajes':'trip_updates','Avisos':'alerts'}
+PERIODS=['Hoy','Última semana','Último mes','Datos piloto EDA','Personalizado']
+
+
+def today_utc():
+    return datetime.now(timezone.utc).date()
+
+
+def preset_dates(period,today):
+    if period=='Hoy':return today,today
+    if period=='Última semana':return today-timedelta(days=6),today
+    if period=='Último mes':return today-timedelta(days=29),today
+    if period=='Datos piloto EDA':return date(2026,5,17),date(2026,7,3)
+    raise ValueError('Período no predefinido')
 
 
 def export_rows(inv,formats,feeds,start,end):
@@ -37,10 +50,22 @@ def render_downloads(cfg):
     if not days:
         st.info('No hay archivos conservados.');return
     first,last=min(days),max(days)
-    completed=[day for day in days if day<datetime.now(timezone.utc).date()]
-    end=max(completed or days);start=max(first,end-timedelta(days=6))
     format_label=st.radio('Formato',list(FORMATS),horizontal=True,key='download_format_simple')
-    selected=st.date_input('Desde / hasta',value=(start,end),min_value=first,max_value=last,key='download_period_simple',format='DD/MM/YYYY')
+    period=st.selectbox('Período',PERIODS,index=1,key='download_preset')
+    if period=='Personalizado':
+        default_end=min(today_utc(),last)
+        default_end=max(first,default_end)
+        default_start=max(first,default_end-timedelta(days=6))
+        if 'download_period_simple' not in st.session_state:
+            st.session_state['download_period_simple']=st.session_state.get('download_custom_dates',(default_start,default_end))
+        selected=st.date_input('Desde / hasta',value=(),min_value=first,max_value=last,key='download_period_simple',format='DD/MM/YYYY')
+        st.session_state['download_custom_dates']=selected
+    else:
+        selected=preset_dates(period,today_utc())
+        start,end=selected
+        st.caption(f'{start:%d/%m/%Y} → {end:%d/%m/%Y}')
+        if period=='Última semana':st.caption('Últimos 7 días, incluido hoy.')
+        elif period=='Último mes':st.caption('Últimos 30 días, incluido hoy.')
     st.caption('Fechas UTC, como las carpetas de los archivos. El día en curso es parcial.')
     gtfs=Path(cfg['storage']['raw_dir'])/'gtfs_static/fomento_transit.zip'
     with st.expander('Elegir fuentes y referencia GTFS'):

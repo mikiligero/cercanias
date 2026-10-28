@@ -5,7 +5,7 @@
 Abre [Descargar datos almacenados](https://cercanias.mikines.es/?pagina=descargas), la opción «Descargar datos» de la barra lateral o el enlace del menú ⋮ → About.
 
 1. Elige bruto `.pb`, Parquet o ambos.
-2. Selecciona la fecha inicial y final. Las fechas corresponden a días UTC, igual que las carpetas conservadas; el día en curso es parcial.
+2. Elige **Hoy**, **Última semana** (7 días, incluido hoy), **Último mes** (30 días, incluido hoy) o **Datos piloto EDA** (17/05/2026–03/07/2026). Usa **Personalizado** para indicar otras fechas. Los días son UTC, igual que las carpetas conservadas; el día en curso es parcial. Solo se incluyen los archivos conservados dentro del intervalo elegido.
 3. Pulsa **Descargar ZIP**. Recibirás un único archivo con todos los días seleccionados, directamente desde el navegador.
 
 Por defecto se incluyen todas las fuentes y una copia del GTFS estático disponible. El apartado «Elegir fuentes y referencia GTFS» permite modificarlo. Esa referencia tiene una fecha propia y puede ser posterior al período elegido. Las instrucciones de colocación están en otro desplegable y dentro del ZIP.

@@ -69,7 +69,7 @@ La captura inicial prepara las fuentes estáticas. El dashboard necesita archivo
 
 La barra lateral incluye «Descargar datos». También se accede desde el menú de los tres puntos → About → Descargar datos almacenados, o desde [la página de descargas](https://cercanias.mikines.es/?pagina=descargas).
 
-Se eligen el formato (bruto `.pb`, Parquet o ambos) y las fechas UTC. Un único botón descarga **todo el período en un ZIP**, conservando las rutas `data/raw/…` y `data/bronze/…`. Por defecto se incluyen todas las fuentes y una sola copia del GTFS disponible. Las fuentes y la referencia se pueden ajustar en un apartado desplegable. El ZIP incluye las instrucciones y un manifiesto de tamaños y SHA-256.
+Se eligen el formato (bruto `.pb`, Parquet o ambos) y el período: hoy, últimos 7 días, últimos 30 días, piloto EDA (17/05/2026–03/07/2026) o fechas personalizadas. Los días de descarga son UTC. Un único botón descarga **todo el período en un ZIP**, conservando las rutas `data/raw/…` y `data/bronze/…`. Por defecto se incluyen todas las fuentes y una sola copia del GTFS disponible. Las fuentes y la referencia se pueden ajustar en un apartado desplegable. El ZIP incluye las instrucciones y un manifiesto de tamaños y SHA-256.
 
 Descomprime el ZIP en la carpeta del proyecto, junto a `dashboard.py`, conservando `data/`. La guía [DESCARGAR_DATOS.md](DESCARGAR_DATOS.md) explica la estructura y el reprocesado local del bruto. Se descargan las fuentes completas conservadas, sin filtrar Madrid ni aplicar el filtro analítico de retrasos. La fecha del GTFS disponible puede ser posterior al período elegido.
 
