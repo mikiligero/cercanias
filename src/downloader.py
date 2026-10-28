@@ -1,9 +1,11 @@
 import logging
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
 from google.transit import gtfs_realtime_pb2
+from src.capture_status import read_status, write_status
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +21,8 @@ class FeedDownloader:
 
     def __init__(self, feed_name: str, url: str, raw_dir: Path, http_cfg: dict):
         self.feed_name = feed_name
+        self.raw_dir = raw_dir
+        self._status = read_status(raw_dir, feed_name)
         self.url = url
         self.feed_dir = raw_dir / feed_name
         self.feed_dir.mkdir(parents=True, exist_ok=True)
@@ -48,11 +52,13 @@ class FeedDownloader:
         Descarga el feed. Devuelve el path al .pb guardado, o None si el feed no ha
         cambiado (mismo timestamp) o si la descarga/parseo ha fallado.
         """
+        self._status['last_attempt'] = datetime.now(timezone.utc).isoformat()
         try:
             resp = self._session.get(self.url, timeout=self._timeout)
             resp.raise_for_status()
         except requests.RequestException as exc:
             logger.error("[%s] error en descarga: %s", self.feed_name, exc)
+            self._record_status(error=str(exc)[:250], state='Error de descarga')
             return None
 
         raw = resp.content
@@ -60,12 +66,18 @@ class FeedDownloader:
         feed = gtfs_realtime_pb2.FeedMessage()
         try:
             feed.ParseFromString(raw)
+            if not feed.IsInitialized():
+                raise ValueError('Mensaje Protobuf incompleto')
         except Exception as exc:
             logger.error("[%s] error parseando protobuf: %s", self.feed_name, exc)
+            self._record_status(error=str(exc)[:250], state='Mensaje no válido')
             return None
 
         # Si header.timestamp es 0 (campo no informado), usamos la hora actual como fallback
         feed_ts = feed.header.timestamp or int(datetime.now(timezone.utc).timestamp())
+        self._record_status(last_success=datetime.now(timezone.utc).isoformat(), error=None,
+                            state='Descarga correcta', source_timestamp=int(feed.header.timestamp),
+                            entity_count=len(feed.entity), content_sha256=hashlib.sha256(raw).hexdigest())
 
         if feed_ts == self._last_ts:
             logger.debug("[%s] sin cambios (ts=%d), omitiendo escritura", self.feed_name, feed_ts)
@@ -86,3 +98,10 @@ class FeedDownloader:
 
     def close(self):
         self._session.close()
+
+    def _record_status(self, **values):
+        self._status.update(values)
+        try:
+            write_status(self.raw_dir, self.feed_name, self._status)
+        except OSError as exc:
+            logger.warning('[%s] no se pudo conservar el estado: %s', self.feed_name, exc)

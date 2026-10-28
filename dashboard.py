@@ -1,75 +1,28 @@
-"""
-Dashboard Streamlit — Puntualidad Cercanías Renfe
-Refresco automático cada 30 s (sincronizado con el ciclo del feed).
-
-Arranca con:
-    streamlit run dashboard.py
-"""
-import shutil
-import time
+"""Anticipa · cuadro de mando del piloto. Actualización manual."""
+import html
 import zipfile
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
-
-import duckdb
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-
 from src.config import load
-from src.query import (
-    active_alerts,
-    delays_by_trip,
-    network_heatmap,
-    punctuality_over_time,
-    snapshot_summary,
-)
+from src.pilot_view import render_pilot, _number
+from src.quality_view import render_quality
+from src.trace_view import render_trace
+from src.alerts_view import render_alerts
+from src.dashboard_data import build_dashboard_connection
+from src.presentation import (MADRID, NUCLEUS_NAMES, PERIOD_OPTIONS, decimal,
+                              local_time, madrid_series, period_bounds)
+from src.query import (FILTER_DESCRIPTION, snapshot_summary, delay_audit, delays_by_trip,
+                       punctuality_over_time, network_heatmap, nucleus_current,
+                       nucleus_history, nucleus_top_delays)
 
-# ---------------------------------------------------------------------------
-# Constantes
-# ---------------------------------------------------------------------------
-NUCLEUS_NAMES = {
-    "10": "Madrid",
-    "20": "Asturias",
-    "30": "Sevilla",
-    "31": "Cádiz",
-    "32": "Málaga",
-    "40": "Valencia",
-    "41": "Murcia-Alicante",
-    "51": "Cataluña (Rodalies)",
-    "60": "Bilbao",
-    "62": "Cantabria",
-    "70": "Zaragoza",
-}
+VIEWS = ['📊 El piloto en cifras', '🔎 Del dato al indicador', '🔴 Red en vivo',
+         '🗺️ Por núcleo', '📈 Tendencia del día', '⚙️ Sistema y calidad']
+st.set_page_config(page_title='Anticipa · Cuadro de mando (prototipo)', page_icon='🚆', layout='wide')
 
-PERIOD_OPTIONS = [
-    "Última hora",
-    "Últimas 3h",
-    "Últimas 6h",
-    "Últimas 12h",
-    "Últimas 24h",
-    "Hoy",
-    "Ayer",
-    "Esta semana",
-    "Semana pasada",
-    "Este mes",
-    "Mes pasado",
-    "Personalizado",
-]
-
-# ---------------------------------------------------------------------------
-# Configuración de página
-# ---------------------------------------------------------------------------
-st.set_page_config(
-    page_title="Cercanías Renfe — Puntualidad",
-    page_icon="🚆",
-    layout="wide",
-)
-
-# ---------------------------------------------------------------------------
-# Carga de recursos (cacheados entre refrescos)
-# ---------------------------------------------------------------------------
 
 @st.cache_resource
 def _load_cfg():
@@ -77,654 +30,261 @@ def _load_cfg():
 
 
 @st.cache_resource
-def _load_gtfs_static(raw_dir: str):
-    zip_path = Path(raw_dir) / "gtfs_static" / "fomento_transit.zip"
-    if not zip_path.exists():
-        return None
-
-    def _read(name, cols):
-        with zipfile.ZipFile(zip_path) as zf:
-            with zf.open(name) as f:
+def _load_gtfs_static(raw_dir, version):
+    path = Path(raw_dir) / 'gtfs_static/fomento_transit.zip'
+    result = {}
+    with zipfile.ZipFile(path) as z:
+        for table, cols in (
+            ('trips', ['trip_id', 'route_id', 'service_id']),
+            ('routes', ['route_id', 'route_short_name', 'route_long_name']),
+            ('stops', ['stop_id', 'stop_name', 'stop_lat', 'stop_lon'])):
+            with z.open(table+'.txt') as f:
                 df = pd.read_csv(f, dtype=str)
-        df.columns = df.columns.str.strip()
-        return df[cols].apply(lambda c: c.str.strip() if c.dtype == "object" else c)
-
-    trips  = _read("trips.txt",  ["trip_id", "route_id", "service_id"])
-    routes = _read("routes.txt", ["route_id", "route_short_name", "route_long_name"])
-    stops  = _read("stops.txt",  ["stop_id", "stop_name", "stop_lat", "stop_lon"])
-    routes["nucleus_code"] = routes["route_id"].str.extract(r'^(\d+)T')
-    return {"trips": trips, "routes": routes, "stops": stops}
+            df.columns = df.columns.str.strip()
+            result[table] = df[cols].apply(lambda c: c.str.strip()).drop_duplicates()
+    result['routes']['nucleus_code'] = result['routes']['route_id'].str.extract(r'^(\d+)T')
+    return result
 
 
-def _build_con(cfg: dict, gtfs: dict | None) -> duckdb.DuckDBPyConnection:
-    bronze = Path(cfg["storage"]["bronze_dir"])
-    con = duckdb.connect()
-    for feed in ("vehicle_positions", "trip_updates", "alerts"):
-        pattern = str(bronze / feed / "**" / "*.parquet")
-        con.execute(
-            f"CREATE VIEW {feed} AS "
-            f"SELECT * FROM read_parquet('{pattern}', hive_partitioning=true)"
-        )
-    if gtfs:
-        con.register("trips",  gtfs["trips"])
-        con.register("routes", gtfs["routes"])
-        con.register("stops",  gtfs["stops"])
-    return con
+def _semaforo(value):
+    if pd.isna(value):
+        return '⚪'
+    return '🟢' if value <= 2 else '🟡' if value <= 10 else '🔴'
 
 
-# ---------------------------------------------------------------------------
-# Helpers visuales
-# ---------------------------------------------------------------------------
-
-def _semaforo(minutes: float) -> str:
-    if minutes <= 2:   return "🟢"
-    if minutes <= 10:  return "🟡"
-    return "🔴"
+def _name(code):
+    return NUCLEUS_NAMES.get(code, 'Núcleo '+str(code))
 
 
-def _card_bg(minutes: float) -> str:
-    if minutes <= 2:   return "#d4edda"
-    if minutes <= 10:  return "#fff3cd"
-    return "#f8d7da"
+def _audit(con, start=None, end=None, ncode=None):
+    counts = delay_audit(con, start, end, ncode)
+    st.caption(FILTER_DESCRIPTION+' '+
+        f"Observaciones: {_number(counts['validas'])} incluidas · {_number(counts['excluidas'])} fuera del intervalo · "
+        f"{_number(counts['sin_delay'])} sin valor de retraso. Total: {_number(counts['total'])}.")
 
 
-def _ago(epoch: int | float | None) -> str:
-    if epoch is None:
-        return "—"
-    secs = int(datetime.now(timezone.utc).timestamp() - float(epoch))
-    if secs < 60:
-        return f"hace {secs}s"
-    return f"hace {secs // 60}m {secs % 60}s"
+def _table(df, formats=None):
+    st.dataframe(df.style.format(formats or {}, na_rep='Sin datos', decimal=',', thousands='.'),
+                 use_container_width=True, hide_index=True)
 
 
-# ---------------------------------------------------------------------------
-# Período
-# ---------------------------------------------------------------------------
-
-def _period_bounds(preset: str, custom_range=None) -> tuple[int, int]:
-    """Devuelve (start_ts, end_ts) en epoch UTC según el preset."""
-    now = datetime.now(timezone.utc)
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    end = now
-
-    if preset == "Última hora":
-        start = now - timedelta(hours=1)
-    elif preset == "Últimas 3h":
-        start = now - timedelta(hours=3)
-    elif preset == "Últimas 6h":
-        start = now - timedelta(hours=6)
-    elif preset == "Últimas 12h":
-        start = now - timedelta(hours=12)
-    elif preset == "Últimas 24h":
-        start = now - timedelta(hours=24)
-    elif preset == "Hoy":
-        start = today_start
-    elif preset == "Ayer":
-        start = today_start - timedelta(days=1)
-        end   = today_start
-    elif preset == "Esta semana":
-        start = today_start - timedelta(days=today_start.weekday())
-    elif preset == "Semana pasada":
-        this_week_start = today_start - timedelta(days=today_start.weekday())
-        start = this_week_start - timedelta(days=7)
-        end   = this_week_start
-    elif preset == "Este mes":
-        start = today_start.replace(day=1)
-    elif preset == "Mes pasado":
-        first_this_month = today_start.replace(day=1)
-        start = (first_this_month - timedelta(days=1)).replace(day=1)
-        end   = first_this_month
-    elif preset == "Personalizado" and custom_range and len(custom_range) == 2:
-        start = datetime(
-            custom_range[0].year, custom_range[0].month, custom_range[0].day,
-            tzinfo=timezone.utc,
-        )
-        end = datetime(
-            custom_range[1].year, custom_range[1].month, custom_range[1].day,
-            23, 59, 59, tzinfo=timezone.utc,
-        )
-    else:
-        start = today_start
-
-    return int(start.timestamp()), int(end.timestamp())
+def _plot(fig):
+    fig.update_layout(separators=',.')
+    st.plotly_chart(fig, use_container_width=True)
 
 
-def _period_label(start_ts: int, end_ts: int) -> str:
-    fmt = "%d/%m %H:%M"
-    s = datetime.fromtimestamp(start_ts, tz=timezone.utc).strftime(fmt)
-    e = datetime.fromtimestamp(end_ts,   tz=timezone.utc).strftime(fmt)
-    return f"{s} → {e} UTC"
-
-
-# ---------------------------------------------------------------------------
-# Consultas por núcleo
-# ---------------------------------------------------------------------------
-
-def _nucleus_current(con) -> pd.DataFrame:
-    return con.execute("""
-        WITH
-        latest_vp AS (SELECT max(snapshot_ts) ts FROM vehicle_positions),
-        latest_tu AS (SELECT max(snapshot_ts) ts FROM trip_updates),
-        trenes AS (
-            SELECT r.nucleus_code AS ncode, count(*) AS circulando
-            FROM vehicle_positions vp
-            JOIN latest_vp ON vp.snapshot_ts = latest_vp.ts
-            JOIN trips  t ON vp.trip_id = t.trip_id
-            JOIN routes r ON t.route_id = r.route_id
-            WHERE r.nucleus_code IS NOT NULL
-            GROUP BY ncode
-        ),
-        retrasos AS (
-            SELECT r.nucleus_code AS ncode,
-                   round(max(tu.arrival_delay) / 60.0, 1) AS max_min,
-                   round(avg(tu.arrival_delay) / 60.0, 1) AS media_min
-            FROM trip_updates tu
-            JOIN latest_tu ON tu.snapshot_ts = latest_tu.ts
-            JOIN trips  t ON tu.trip_id = t.trip_id
-            JOIN routes r ON t.route_id = r.route_id
-            WHERE tu.arrival_delay IS NOT NULL AND r.nucleus_code IS NOT NULL
-            GROUP BY ncode
-        )
-        SELECT t.ncode,
-               t.circulando,
-               coalesce(r.max_min,   0) AS retraso_max_min,
-               coalesce(r.media_min, 0) AS retraso_medio_min
-        FROM trenes t
-        LEFT JOIN retrasos r ON t.ncode = r.ncode
-        ORDER BY t.circulando DESC
-    """).df()
-
-
-def _nucleus_history(con, start_ts: int, end_ts: int) -> pd.DataFrame:
-    return con.execute(f"""
-        SELECT
-            to_timestamp(tu.snapshot_ts)               AS ts,
-            r.nucleus_code                             AS ncode,
-            round(avg(tu.arrival_delay) / 60.0, 1)    AS media_min,
-            round(max(tu.arrival_delay) / 60.0, 1)    AS max_min
-        FROM trip_updates tu
-        JOIN trips  t ON tu.trip_id = t.trip_id
-        JOIN routes r ON t.route_id = r.route_id
-        WHERE tu.arrival_delay IS NOT NULL
-          AND r.nucleus_code IS NOT NULL
-          AND tu.snapshot_ts BETWEEN {start_ts} AND {end_ts}
-        GROUP BY tu.snapshot_ts, r.nucleus_code
-        ORDER BY tu.snapshot_ts
-    """).df()
-
-
-def _nucleus_top_delays(con, ncode: str | None = None) -> pd.DataFrame:
-    nc_filter = f"AND r.nucleus_code = '{ncode}'" if ncode else ""
-    return con.execute(f"""
-        WITH latest AS (SELECT max(snapshot_ts) ts FROM trip_updates)
-        SELECT r.nucleus_code AS ncode, r.route_short_name AS linea,
-               tu.trip_id,
-               round(tu.arrival_delay / 60.0, 1) AS retraso_min
-        FROM trip_updates tu
-        JOIN latest   ON tu.snapshot_ts = latest.ts
-        JOIN trips  t ON tu.trip_id = t.trip_id
-        JOIN routes r ON t.route_id = r.route_id
-        WHERE tu.arrival_delay > 60 AND r.nucleus_code IS NOT NULL
-        {nc_filter}
-        ORDER BY tu.arrival_delay DESC
-        LIMIT 20
-    """).df()
-
-
-# ---------------------------------------------------------------------------
-# Sidebar — selector de período
-# ---------------------------------------------------------------------------
-
-with st.sidebar:
-    st.header("⏱ Período")
-    period_preset = st.selectbox(
-        "Rango de tiempo",
-        PERIOD_OPTIONS,
-        index=PERIOD_OPTIONS.index("Hoy"),
-        key="period_preset",
-    )
-
-    custom_range = None
-    if period_preset == "Personalizado":
-        custom_range = st.date_input(
-            "Selecciona fechas",
-            value=(date.today() - timedelta(days=7), date.today()),
-            max_value=date.today(),
-            key="custom_range",
-        )
-
-    start_ts, end_ts = _period_bounds(period_preset, custom_range)
-    st.caption(_period_label(start_ts, end_ts))
-
+def _live(con, cfg, gtfs, ncode, start, end, preset):
+    summary = snapshot_summary(con, ncode).iloc[0]
+    st.subheader('Última captura · '+scope_name)
+    a,b,c,d,e = st.columns(5)
+    a.metric('Observaciones evaluadas', _number(summary['trenes']))
+    b.metric('Con retraso positivo', _number(summary['con_retraso']))
+    c.metric('Sin retraso (≤0 s)', _number(summary['a_tiempo']))
+    d.metric('Media con retraso positivo', decimal(summary['retraso_medio_min'], ' min'))
+    e.metric('Máximo incluido', decimal(summary['retraso_max_min'], ' min'))
+    stamp = summary['snapshot_ts']
+    st.caption('Dato generado el '+local_time(stamp)+' (Madrid). '+
+               _number(summary['viajes'])+' identificadores de viaje distintos entre las observaciones evaluadas.')
+    if pd.notna(stamp) and datetime.now(MADRID).timestamp()-float(stamp)>120:
+        st.warning('El último dato de actualizaciones tiene más de dos minutos. Comprueba la fuente en Sistema y calidad.')
+    _audit(con, ncode=ncode)
+    if not summary['trenes']:
+        st.info('No hay observaciones evaluables en la última captura para este ámbito. Las métricas sin datos no se sustituyen por cero.')
     st.divider()
-    st.caption("El período afecta a gráficos históricos y tablas de tendencia.\nLos KPIs en vivo y el estado actual siempre muestran el último snapshot.")
-
-
-# ---------------------------------------------------------------------------
-# Arranque
-# ---------------------------------------------------------------------------
-
-cfg  = _load_cfg()
-gtfs = _load_gtfs_static(cfg["storage"]["raw_dir"])
-con  = _build_con(cfg, gtfs)
-now  = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-
-st.title("🚆 Cercanías Renfe — Puntualidad en tiempo real")
-st.caption(f"Última actualización: {now} · Refresco automático cada 30 s")
-
-tab1, tab2, tab3, tab4 = st.tabs([
-    "🔴 Red en vivo",
-    "🗺️ Por núcleo",
-    "📈 Tendencia del día",
-    "⚙️ Sistema",
-])
-
-# ===========================================================================
-# TAB 1 — Red en vivo
-# ===========================================================================
-with tab1:
-
-    summary = snapshot_summary(con)
-    if summary.empty or summary["trenes"].iloc[0] is None:
-        st.warning("Sin datos de trip_updates todavía. Espera el primer ciclo de ingesta.")
-    else:
-        row = summary.iloc[0]
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Trenes con info",  int(row["trenes"]))
-        c2.metric("Con retraso",      int(row["con_retraso"] or 0))
-        c3.metric("A tiempo",         int(row["a_tiempo"] or 0))
-        c4.metric("Retraso medio",    f"{row['retraso_medio_min'] or 0} min")
-        c5.metric("Retraso máximo",   f"{row['retraso_max_min'] or 0} min")
-        st.caption(f"Snapshot: {row['snapshot']}")
-
-    st.divider()
-
-    col_left, col_right = st.columns([1, 3])
-    with col_left:
-        min_delay = st.slider("Retraso mínimo (min)", 0, 30, 1, key="t1_min_delay")
-
-        # Filtro de núcleo
-        sel_ncode_t1 = None
-        if gtfs and "nucleus_code" in gtfs["routes"].columns:
-            nucleus_map = {
-                NUCLEUS_NAMES.get(n, n): n
-                for n in sorted(gtfs["routes"]["nucleus_code"].dropna().unique())
-            }
-            nucleus_display = ["Todos los núcleos"] + sorted(nucleus_map.keys())
-            sel_nuc_name = st.selectbox("Núcleo", nucleus_display, key="t1_nucleus")
-            if sel_nuc_name != "Todos los núcleos":
-                sel_ncode_t1 = nucleus_map[sel_nuc_name]
-
-        # Filtro de línea (dentro del núcleo si se ha seleccionado)
+    st.subheader('Observaciones de retraso · '+preset)
+    left,right = st.columns([1,3])
+    with left:
+        minimum = st.slider('Retraso mínimo (min)', 0, 30, 1, key='t1_min_delay')
+        route_df = gtfs['routes'] if gtfs else pd.DataFrame()
+        if gtfs and ncode:
+            route_df = route_df[route_df['nucleus_code']==ncode]
+        lines = sorted(route_df['route_short_name'].dropna().unique()) if gtfs else []
+        selected = st.multiselect('Filtrar línea', lines, key='t1_lines')
+    with right:
         if gtfs:
-            route_df = gtfs["routes"]
-            if sel_ncode_t1:
-                route_df = route_df[route_df["nucleus_code"] == sel_ncode_t1]
-            all_lines = sorted(route_df["route_short_name"].dropna().unique().tolist())
-            sel_lines = st.multiselect("Filtrar línea", all_lines, key="t1_lines")
-        else:
-            sel_lines = []
-
-    with col_right:
-        # Último snapshot dentro del período seleccionado
-        period_snap = con.execute(
-            f"SELECT max(snapshot_ts) FROM trip_updates "
-            f"WHERE snapshot_ts BETWEEN {start_ts} AND {end_ts}"
-        ).fetchone()[0]
-
-        if period_snap is None:
-            st.info(f"Sin datos en el período seleccionado ({period_preset}).")
-        else:
-            df_delays = delays_by_trip(con, snapshot_ts=period_snap,
-                                       min_delay_sec=min_delay * 60)
-            # Aplicar filtro de núcleo post-query
-            if sel_ncode_t1 and gtfs:
-                nucleus_lines = gtfs["routes"][
-                    gtfs["routes"]["nucleus_code"] == sel_ncode_t1
-                ]["route_short_name"].tolist()
-                df_delays = df_delays[df_delays["linea"].isin(nucleus_lines)]
-            if sel_lines:
-                df_delays = df_delays[df_delays["linea"].isin(sel_lines)]
-
-            if df_delays.empty:
-                st.info("Sin trenes con ese retraso en el snapshot seleccionado.")
-            else:
-                df_delays["estado"] = df_delays["retraso_min"].apply(_semaforo)
-                st.dataframe(
-                    df_delays[["estado", "linea", "trip_id", "parada",
-                               "retraso_min", "retraso_seg"]],
-                    use_container_width=True, hide_index=True,
-                    column_config={
-                        "estado":      st.column_config.TextColumn("", width="small"),
-                        "linea":       st.column_config.TextColumn("Línea"),
-                        "trip_id":     st.column_config.TextColumn("Tren"),
-                        "parada":      st.column_config.TextColumn("Parada"),
-                        "retraso_min": st.column_config.NumberColumn("Retraso (min)", format="%.1f"),
-                        "retraso_seg": st.column_config.NumberColumn("Retraso (seg)", format="%d"),
-                    },
-                )
-                snap_dt = datetime.fromtimestamp(period_snap, tz=timezone.utc).strftime("%H:%M:%S UTC")
-                st.caption(f"{len(df_delays)} trenes · snapshot {snap_dt}")
-
-    st.divider()
-    st.subheader("⚠️ Alertas activas")
-    df_al = active_alerts(con)
-    if df_al.empty:
-        st.success("Sin alertas activas en este momento.")
-    else:
-        for _, row in df_al.iterrows():
-            routes_str = row["informed_routes"] or ""
-            lines = ", ".join(sorted(set(
-                r.split("T")[-1] if "T" in r else r
-                for r in routes_str.split(",") if r
-            )))
-            with st.expander(f"**{lines or row['entity_id']}** — desde {row['desde']}"):
-                st.write(row["description_text"] or "Sin descripción.")
-
-
-# ===========================================================================
-# TAB 2 — Por núcleo
-# ===========================================================================
-with tab2:
-
-    df_cur  = _nucleus_current(con)
-    df_hist = _nucleus_history(con, start_ts, end_ts)
-
-    df_cur["nucleo"]  = df_cur["ncode"].map(NUCLEUS_NAMES).fillna(df_cur["ncode"])
-    df_hist["nucleo"] = df_hist["ncode"].map(NUCLEUS_NAMES).fillna(df_hist["ncode"])
-
-    # --- Tarjetas (siempre estado actual) ---
-    st.subheader("Estado actual por núcleo")
-    NCOLS  = 3
-    nuclei = df_cur.to_dict("records")
-    for row_n in [nuclei[i:i+NCOLS] for i in range(0, len(nuclei), NCOLS)]:
-        cols = st.columns(NCOLS)
-        for col, nuc in zip(cols, row_n):
-            bg  = _card_bg(nuc["retraso_medio_min"])
-            sem = _semaforo(nuc["retraso_medio_min"])
-            with col:
-                st.markdown(
-                    f"""
-                    <div style="background:{bg};border-radius:10px;
-                                padding:16px;margin-bottom:8px">
-                      <h4 style="margin:0">{sem} {nuc['nucleo']}</h4>
-                      <hr style="margin:6px 0">
-                      <b>🚆 Trenes circulando:</b> {int(nuc['circulando'])}<br>
-                      <b>⏱️ Retraso máximo:</b> {nuc['retraso_max_min']} min<br>
-                      <b>📊 Retraso medio:</b> {nuc['retraso_medio_min']} min
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-    st.divider()
-
-    # --- Histórico filtrado por período ---
-    st.subheader(f"📈 Retraso histórico por núcleo · {period_preset}")
-    if df_hist.empty:
-        st.info(f"Sin datos en el período seleccionado ({period_preset}).")
-    else:
-        available = sorted(df_hist["nucleo"].unique())
-        default   = [n for n in available
-                     if n in ("Madrid", "Cataluña (Rodalies)", "Valencia",
-                               "Sevilla", "Asturias", "Málaga")]
-        selected  = st.multiselect("Mostrar núcleos:", available,
-                                   default=default or available[:4], key="t2_nuclei")
-        df_plot   = df_hist[df_hist["nucleo"].isin(selected)]
-
-        if not df_plot.empty:
-            fig_h = px.line(
-                df_plot, x="ts", y="media_min", color="nucleo",
-                markers=True,
-                labels={"ts": "Hora", "media_min": "Retraso medio (min)", "nucleo": "Núcleo"},
-                title=f"Retraso medio por núcleo — {period_preset}",
-                height=400,
-            )
-            fig_h.update_layout(
-                xaxis_title="Hora (UTC)", yaxis_title="Retraso medio (min)",
-                hovermode="x unified",
-            )
-            st.plotly_chart(fig_h, use_container_width=True)
-
-        summary_n = (df_hist[df_hist["nucleo"].isin(selected)]
-                     .groupby("nucleo")
-                     .agg(snapshots=("ts", "count"),
-                          media_dia=("media_min", "mean"),
-                          max_dia=("max_min", "max"))
-                     .round(1).reset_index()
-                     .sort_values("media_dia", ascending=False))
-        st.dataframe(
-            summary_n.rename(columns={
-                "nucleo": "Núcleo", "snapshots": "Snapshots",
-                "media_dia": "Retraso medio período (min)",
-                "max_dia":   "Retraso máx período (min)",
-            }),
-            use_container_width=True, hide_index=True,
-        )
-
-    st.divider()
-
-    # --- Top retrasos (siempre último snapshot) ---
-    st.subheader("🔴 Top retrasos actuales")
-    col_f, col_t = st.columns([1, 3])
-    with col_f:
-        nucleus_opts = ["Todos"] + sorted(df_cur["nucleo"].tolist())
-        sel_nuc_t2 = st.selectbox("Filtrar por núcleo", nucleus_opts, key="t2_nucleus")
-    with col_t:
-        ncode_f = None
-        if sel_nuc_t2 != "Todos":
-            r = df_cur[df_cur["nucleo"] == sel_nuc_t2]
-            if not r.empty:
-                ncode_f = r.iloc[0]["ncode"]
-        df_top = _nucleus_top_delays(con, ncode_f)
-        if not df_top.empty:
-            df_top["nucleo"]   = df_top["ncode"].map(NUCLEUS_NAMES).fillna(df_top["ncode"])
-            df_top["semaforo"] = df_top["retraso_min"].apply(_semaforo)
-            st.dataframe(
-                df_top[["semaforo", "nucleo", "linea", "trip_id", "retraso_min"]],
-                use_container_width=True, hide_index=True,
-                column_config={
-                    "semaforo":    st.column_config.TextColumn("", width="small"),
-                    "nucleo":      st.column_config.TextColumn("Núcleo"),
-                    "linea":       st.column_config.TextColumn("Línea"),
-                    "trip_id":     st.column_config.TextColumn("Tren"),
-                    "retraso_min": st.column_config.NumberColumn("Retraso (min)", format="%.1f"),
-                },
-            )
-        else:
-            st.success("Sin trenes con retraso > 1 min en el último snapshot.")
-
-
-# ===========================================================================
-# TAB 3 — Tendencia del día
-# ===========================================================================
-with tab3:
-
-    st.subheader(f"Puntualidad a lo largo del tiempo · {period_preset}")
-    df_time = punctuality_over_time(con, start_ts=start_ts, end_ts=end_ts)
-
-    if df_time.empty:
-        st.info(f"Sin datos en el período seleccionado ({period_preset}).")
-    else:
-        fig = go.Figure()
-        fig.add_trace(go.Bar(
-            x=df_time["ts"], y=df_time["pct_puntual"],
-            name="% puntual", marker_color="steelblue", opacity=0.7, yaxis="y1",
-        ))
-        fig.add_trace(go.Scatter(
-            x=df_time["ts"], y=df_time["retraso_medio_min"],
-            name="Retraso medio (min)", line=dict(color="tomato", width=2),
-            mode="lines+markers", yaxis="y2",
-        ))
-        fig.update_layout(
-            title=f"Puntualidad — {period_preset}",
-            xaxis_title="Hora (UTC)",
-            yaxis=dict(title="% trenes puntuales", range=[0, 100]),
-            yaxis2=dict(title="Retraso medio (min)", overlaying="y", side="right"),
-            legend=dict(orientation="h", y=1.1),
-            height=420,
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.dataframe(
-            df_time.rename(columns={
-                "ts": "Hora", "trenes": "Trenes",
-                "pct_puntual": "% puntual", "retraso_medio_min": "Retraso medio (min)",
-            }),
-            use_container_width=True, hide_index=True,
-        )
-
-    st.divider()
-
-    if gtfs:
-        st.subheader(f"📍 Retraso medio acumulado por parada · {period_preset}")
-        df_map = network_heatmap(con, start_ts=start_ts, end_ts=end_ts)
-        if not df_map.empty:
-            fig_map = px.scatter_mapbox(
-                df_map, lat="lat", lon="lon",
-                color="retraso_medio_min", size="n_obs",
-                hover_name="stop_name",
-                hover_data={"retraso_medio_min": ":.1f", "n_obs": True},
-                color_continuous_scale="RdYlGn_r",
-                mapbox_style="carto-positron",
-                zoom=5, center={"lat": 40.4, "lon": -3.7},
-                height=500,
-                title=f"Retraso medio por parada — {period_preset}",
-            )
-            fig_map.update_layout(margin={"r": 0, "t": 40, "l": 0, "b": 0})
-            st.plotly_chart(fig_map, use_container_width=True)
-        else:
-            st.info("Sin observaciones suficientes en el período seleccionado.")
-    else:
-        st.info("Mapa no disponible — GTFS estático no descargado.")
-
-
-# ===========================================================================
-# TAB 4 — Sistema
-# ===========================================================================
-with tab4:
-
-    st.subheader("🗂️ Estado del pipeline")
-
-    raw_dir    = Path(cfg["storage"]["raw_dir"])
-    bronze_dir = Path(cfg["storage"]["bronze_dir"])
-
-    rows_pipe = []
-    for feed in ("vehicle_positions", "trip_updates", "alerts"):
-        pbs    = sorted((raw_dir    / feed).rglob("*.pb"))
-        pqs    = sorted((bronze_dir / feed).rglob("*.parquet"))
-        raw_kb = sum(f.stat().st_size for f in pbs)  / 1024
-        pq_kb  = sum(f.stat().st_size for f in pqs)  / 1024
-        last_ts = None
-        if pbs:
+            period_con = build_dashboard_connection(cfg, gtfs, start, end, period_latest=True)
             try:
-                ts_str  = pbs[-1].stem.split("_")[-1]
-                last_ts = datetime.strptime(ts_str, "%Y%m%dT%H%M%SZ").replace(
-                    tzinfo=timezone.utc).timestamp()
-            except ValueError:
-                pass
-        rows_pipe.append({
-            "Feed": feed, ".pb": len(pbs), "Parquet": len(pqs),
-            "Raw (KB)": round(raw_kb, 1), "Parquet (KB)": round(pq_kb, 1),
-            "Último snapshot": _ago(last_ts),
-        })
-
-    st.dataframe(pd.DataFrame(rows_pipe), use_container_width=True, hide_index=True)
-
-    # --- Espacio en disco ---
-    st.subheader("💾 Espacio en disco")
-
-    def _dir_mb(path: Path, pattern: str = "*") -> float:
-        return sum(f.stat().st_size for f in path.rglob(pattern) if f.is_file()) / 1024 / 1024
-
-    raw_mb    = _dir_mb(raw_dir, "*.pb")
-    bronze_mb = _dir_mb(bronze_dir, "*.parquet")
-    gtfs_mb   = _dir_mb(raw_dir / "gtfs_static") if (raw_dir / "gtfs_static").exists() else 0.0
-    total_mb  = raw_mb + bronze_mb + gtfs_mb
-
-    disk      = shutil.disk_usage(raw_dir)
-    disk_used_gb  = disk.used  / 1024 ** 3
-    disk_total_gb = disk.total / 1024 ** 3
-    disk_free_gb  = disk.free  / 1024 ** 3
-    pct_used      = disk.used / disk.total
-
-    d1, d2, d3, d4 = st.columns(4)
-    d1.metric("Raw (.pb)",         f"{raw_mb:.1f} MB")
-    d2.metric("Bronze (Parquet)",  f"{bronze_mb:.1f} MB")
-    d3.metric("GTFS estático",     f"{gtfs_mb:.1f} MB")
-    d4.metric("Total datos",       f"{total_mb:.1f} MB")
-
-    st.progress(pct_used, text=f"Disco: {disk_used_gb:.1f} GB usados / {disk_total_gb:.1f} GB total — {disk_free_gb:.1f} GB libres")
-
+                stamp = period_con.execute('SELECT max(snapshot_ts) FROM trip_updates WHERE snapshot_ts BETWEEN ? AND ?', [start,end]).fetchone()[0]
+                if stamp is None:
+                    st.info('No hay capturas en el período seleccionado.')
+                else:
+                    df = delays_by_trip(period_con, stamp, minimum*60, ncode)
+                    if selected:
+                        df = df[df['linea'].isin(selected)]
+                    if df.empty:
+                        st.info('No hay observaciones que cumplan estos filtros en la captura seleccionada.')
+                    else:
+                        df.insert(0, 'Estado', df['retraso_min'].map(_semaforo))
+                        _table(df.rename(columns={'linea':'Línea','trip_id':'ID de viaje','parada':'Parada',
+                            'retraso_min':'Retraso (min)','retraso_seg':'Retraso (s)'}), {'Retraso (min)':'{:.1f}','Retraso (s)':'{:.0f}'})
+                    st.caption(f'{len(df)} observaciones · captura del '+local_time(stamp)+' (Madrid). El filtro de línea afecta a esta tabla.')
+            finally:
+                period_con.close()
+        else:
+            st.info('El detalle por línea requiere la referencia GTFS.')
     st.divider()
+    render_alerts(con, cfg, gtfs, ncode)
 
-    vp_pbs = sorted((raw_dir / "vehicle_positions").rglob("*.pb"))
-    if vp_pbs:
-        try:
-            ts_str  = vp_pbs[-1].stem.split("_")[-1]
-            last_dt = datetime.strptime(ts_str, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
-            age     = (datetime.now(timezone.utc) - last_dt).total_seconds()
-            if age < 60:
-                st.success(f"✅ Pipeline activo — último snapshot hace {int(age)}s")
-            elif age < 120:
-                st.warning(f"⚠️ Pipeline lento — último snapshot hace {int(age)}s")
-            else:
-                st.error(f"❌ Pipeline detenido — último snapshot hace {int(age // 60)}m")
-        except ValueError:
-            st.warning("No se pudo leer el timestamp del último .pb")
+
+def _nuclei(con, ncode, start, end, preset):
+    current = nucleus_current(con)
+    current['nucleo'] = current['ncode'].map(_name)
+    if ncode:
+        current = current[current['ncode']==ncode]
+    st.subheader('Estado actual · '+scope_name)
+    if current.empty:
+        st.info('Sin posiciones ni estimaciones con correspondencia GTFS para este ámbito.')
+    records = current.to_dict('records')
+    for offset in range(0, len(records), 3):
+        for col,row in zip(st.columns(3), records[offset:offset+3]):
+            value = row['retraso_medio_min']
+            bg = '#eef1f5' if pd.isna(value) else '#d4edda' if value<=2 else '#fff3cd' if value<=10 else '#f8d7da'
+            positions = 'Sin datos' if pd.isna(row['circulando']) else _number(row['circulando'])
+            with col:
+                st.markdown(f'''<div style="background:{bg};color:#1E2742;border-radius:10px;padding:16px;margin-bottom:8px">
+                  <h4 style="margin:0;color:#1E2742">{_semaforo(value)} {html.escape(row['nucleo'])}</h4>
+                  <hr style="margin:6px 0"><b>Vehículos observados:</b> {positions}<br>
+                  <b>Desviación media estimada:</b> {decimal(value,' min')}<br>
+                  <b>Máximo incluido:</b> {decimal(row['retraso_max_min'],' min')}<br>
+                  <small>{_number(row['validas'])} observaciones incluidas · {_number(row['excluidas'])} fuera del filtro · {_number(row['sin_delay'])} sin retraso informado</small>
+                  </div>''', unsafe_allow_html=True)
+    st.caption('Vehículos: entidades distintas del último mensaje de posiciones que cruzan con GTFS. Las medias de retraso cuentan observaciones de parada; pueden incluir adelantos. Las capturas de posiciones y retrasos pueden tener fechas distintas.')
+    _audit(con, ncode=ncode)
+    st.divider()
+    st.subheader('Comparación histórica · '+preset)
+    history = nucleus_history(con, start, end)
+    if history.empty:
+        st.info('No hay observaciones dentro del filtro en este período.')
     else:
-        st.error("❌ Sin datos — ejecuta `python main.py`")
-
+        history['nucleo'] = history['ncode'].map(_name)
+        options = sorted(history['nucleo'].unique())
+        default = [scope_name] if ncode and scope_name in options else (['Madrid'] if 'Madrid' in options else options[:1])
+        selected = st.multiselect('Núcleos que se comparan en el histórico', options, default=default, key='t2_nuclei')
+        shown = history[history['nucleo'].isin(selected)].copy()
+        if not shown.empty:
+            shown['ts'] = madrid_series(shown['ts'])
+            fig = px.line(shown, x='ts', y='media_min', color='nucleo',
+                labels={'ts':'Hora (Madrid)','media_min':'Desviación media estimada (min)','nucleo':'Núcleo'}, height=400)
+            fig.update_layout(hovermode='x unified')
+            _plot(fig)
+            grouped = shown.groupby('nucleo').agg(snapshots=('ts','count'),observaciones=('n_obs','sum'),
+                                                suma=('suma_min','sum'),maximo=('max_min','max')).reset_index()
+            grouped['media'] = grouped['suma']/grouped['observaciones']
+            grouped = grouped.rename(columns={'nucleo':'Núcleo','snapshots':'Capturas','observaciones':'Observaciones',
+                                              'media':'Desviación media (min)','maximo':'Máximo incluido (min)'})
+            _table(grouped[['Núcleo','Capturas','Observaciones','Desviación media (min)','Máximo incluido (min)']],
+                   {'Desviación media (min)':'{:.1f}','Máximo incluido (min)':'{:.1f}'})
+            st.caption('Media del período ponderada por observaciones. El selector de comparación solo afecta a este gráfico y su tabla.')
+        comparison_codes=history.loc[history['nucleo'].isin(selected),'ncode'].unique().tolist()
+        st.caption('Los siguientes recuentos corresponden a los núcleos seleccionados para la comparación.')
+        _audit(con, start, end, comparison_codes)
     st.divider()
-    st.subheader("🔍 Calidad de datos")
+    st.subheader('Mayores retrasos actuales · '+scope_name)
+    top = nucleus_top_delays(con, ncode)
+    if top.empty:
+        st.info('No hay observaciones con retraso mayor de un minuto dentro del filtro en la última captura.')
+    else:
+        top['ncode'] = top['ncode'].map(_name)
+        _table(top.rename(columns={'ncode':'Núcleo','linea':'Línea','trip_id':'ID de viaje','retraso_min':'Retraso (min)'}), {'Retraso (min)':'{:.1f}'})
 
+
+def _trend(con, gtfs, ncode, start, end, preset):
+    st.subheader('Evolución de las estimaciones · '+scope_name+' · '+preset)
+    _audit(con, start, end, ncode)
+    data = punctuality_over_time(con, start, end, ncode)
+    if data.empty:
+        st.info('No hay observaciones evaluables en el período seleccionado.')
+    else:
+        data['ts'] = madrid_series(data['ts'])
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=data['ts'],y=data['pct_puntual'],name='% sin retraso (≤0 s)',
+                            marker_color='steelblue',opacity=0.7,yaxis='y1'))
+        fig.add_trace(go.Scatter(x=data['ts'],y=data['retraso_medio_min'],name='Desviación media (min)',
+                                line=dict(color='tomato',width=2),mode='lines',yaxis='y2'))
+        fig.update_layout(xaxis_title='Hora (Madrid)',yaxis=dict(title='% observaciones sin retraso',range=[0,100]),
+            yaxis2=dict(title='Desviación media (min)',overlaying='y',side='right'),
+            legend=dict(orientation='h',y=1.1),height=420)
+        _plot(fig)
+        _table(data.rename(columns={'ts':'Hora (Madrid)','trenes':'Observaciones',
+            'pct_puntual':'% sin retraso (≤0 s)','retraso_medio_min':'Desviación media (min)'}),
+            {'% sin retraso (≤0 s)':'{:.1f}','Desviación media (min)':'{:.1f}'})
+    st.divider()
     if gtfs:
-        df_vp     = con.execute(
-            "SELECT DISTINCT trip_id FROM vehicle_positions WHERE trip_id IS NOT NULL"
-        ).df()
-        total_trips = len(df_vp)
-        matched     = df_vp["trip_id"].isin(gtfs["trips"]["trip_id"]).sum()
-        pct_match   = round(100 * matched / total_trips, 1) if total_trips else 0
-        qa1, qa2, qa3 = st.columns(3)
-        qa1.metric("trip_ids únicos (RT)", total_trips)
-        qa2.metric("Resueltos en GTFS estático", matched)
-        qa3.metric("% resueltos", f"{pct_match}%")
+        st.subheader('Desviación media estimada por parada · '+scope_name)
+        data = network_heatmap(con, start, end, ncode)
+        data = data.dropna(subset=['lat','lon'])
+        data = data[data['lat'].between(-90,90) & data['lon'].between(-180,180) & ~((data['lat']==0)&(data['lon']==0))]
+        if data.empty:
+            st.info('No hay paradas con al menos tres observaciones y coordenadas válidas en este período.')
+        else:
+            center = {'lat':float(data['lat'].median()),'lon':float(data['lon'].median())}
+            fig = px.scatter_map(data,lat='lat',lon='lon',color='retraso_medio_min',size='n_obs',
+                hover_name='stop_name',hover_data={'retraso_medio_min':':.1f','n_obs':True},
+                labels={'retraso_medio_min':'Desviación (min)','n_obs':'Observaciones'},
+                color_continuous_scale='RdYlGn_r',map_style='open-street-map',
+                zoom=8 if ncode else 5,center=center,height=500)
+            fig.update_layout(margin=dict(r=0,t=10,l=0,b=0))
+            _plot(fig)
 
-    df_ent = con.execute("""
-        SELECT to_timestamp(snapshot_ts) AS ts, count(*) AS entidades
-        FROM vehicle_positions
-        GROUP BY snapshot_ts ORDER BY snapshot_ts
-    """).df()
-    if not df_ent.empty:
-        fig_ent = px.line(
-            df_ent, x="ts", y="entidades",
-            title="Trenes capturados por snapshot",
-            labels={"ts": "Hora (UTC)", "entidades": "Nº trenes"}, height=300,
-        )
-        fig_ent.update_traces(line_color="steelblue")
-        st.plotly_chart(fig_ent, use_container_width=True)
 
-    df_gaps = con.execute("""
-        WITH ts_list AS (
-            SELECT DISTINCT snapshot_ts FROM vehicle_positions ORDER BY snapshot_ts
-        ),
-        gaps AS (
-            SELECT snapshot_ts,
-                   lead(snapshot_ts) OVER (ORDER BY snapshot_ts) - snapshot_ts AS gap_sec
-            FROM ts_list
-        )
-        SELECT strftime(to_timestamp(snapshot_ts), '%H:%M:%S') AS hora, gap_sec
-        FROM gaps WHERE gap_sec > 120
-        ORDER BY gap_sec DESC
-    """).df()
-    if df_gaps.empty:
-        st.success("✅ Sin huecos detectados en el histórico (todos los gaps ≤ 120s)")
+if st.session_state.get('selected_view') == '⚙️ Sistema':
+    st.session_state['selected_view'] = '⚙️ Sistema y calidad'
+st.title('🚆 Anticipa · Cercanías Renfe')
+selected_view = st.radio('Vista', VIEWS, horizontal=True, label_visibility='collapsed', key='selected_view')
+cfg = _load_cfg()
+analytical = selected_view in VIEWS[2:5]
+gtfs = None
+if analytical:
+    path = Path(cfg['storage']['raw_dir'])/'gtfs_static/fomento_transit.zip'
+    if path.exists():
+        stat = path.stat()
+        gtfs = _load_gtfs_static(cfg['storage']['raw_dir'], (stat.st_mtime_ns,stat.st_size))
+with st.sidebar:
+    st.button('🔄 Actualizar datos',key='refresh_data',use_container_width=True)
+    if analytical:
+        st.header('Ámbito del piloto')
+        codes = sorted(gtfs['routes']['nucleus_code'].dropna().unique()) if gtfs else []
+        options = ['Todos los núcleos']+[_name(code) for code in codes]
+        current_scope = st.selectbox('Núcleo',options,index=options.index('Madrid') if 'Madrid' in options else 0,key='dashboard_nucleus')
+        ncode = next((code for code in codes if _name(code)==current_scope),None)
+        scope_name = current_scope
+        st.header('⏱ Período')
+        preset = st.selectbox('Rango de tiempo',PERIOD_OPTIONS,index=PERIOD_OPTIONS.index('Hoy'),key='period_preset')
+        chosen = None
+        if preset=='Personalizado':
+            today = datetime.now(MADRID).date()
+            chosen = st.date_input('Fechas (Madrid)',value=(today-timedelta(days=7),today),max_value=today,key='custom_range')
+            if len(chosen)!=2:
+                st.info('Selecciona las fechas inicial y final.');st.stop()
+        start,end = period_bounds(preset,chosen)
+        st.caption(local_time(start,'%d/%m %H:%M')+' → '+local_time(end,'%d/%m %H:%M')+' · Madrid')
+        st.caption('El núcleo se aplica a las métricas, tablas y mapa. El período afecta al histórico; el estado actual usa la última captura.')
     else:
-        st.warning(f"⚠️ {len(df_gaps)} huecos detectados (gap > 120s entre snapshots)")
-        st.dataframe(df_gaps, use_container_width=True, hide_index=True)
-
-# ---------------------------------------------------------------------------
-# Auto-refresco
-# ---------------------------------------------------------------------------
-time.sleep(30)
-st.rerun()
+        st.caption('Esta vista conserva su propio ámbito y filtros. El inventario cubre toda la red capturada; el ejemplo preparado sigue una observación de Madrid.')
+if selected_view!='📊 El piloto en cifras':
+    st.caption('Página consultada el '+datetime.now(MADRID).strftime('%d/%m/%Y %H:%M:%S')+' (Madrid) · Actualización manual')
+if selected_view=='📊 El piloto en cifras':
+    render_pilot(cfg)
+elif selected_view=='⚙️ Sistema y calidad':
+    render_quality(cfg)
+elif selected_view=='🔎 Del dato al indicador':
+    render_trace(cfg)
+else:
+    st.caption('Ámbito: '+scope_name+'. Las observaciones por núcleo requieren correspondencia con la copia GTFS disponible.')
+    with st.expander('Cómo interpretar los indicadores'):
+        st.write('El retraso procede de estimaciones publicadas por Renfe. Cada fila corresponde a una actualización de parada; un viaje puede aportar varias. El porcentaje sin retraso utiliza valores ≤0 segundos y no valida llegadas reales.')
+        st.write(FILTER_DESCRIPTION)
+        st.write('La media positiva usa únicamente valores >0. La desviación media incluye adelantos y retrasos dentro del filtro. Los semáforos orientativos son verde hasta 2 minutos, amarillo hasta 10 y rojo por encima de 10; no cambian la definición del porcentaje sin retraso.')
+        st.write('En el histórico, algunos campos delay ausentes se guardaron como cero por el lector. La vista Del dato al indicador permite comprobar su presencia en el mensaje original; estos valores requieren revisión antes de interpretar puntualidad real.')
+    con = build_dashboard_connection(cfg,gtfs,start,end,history=selected_view!='🔴 Red en vivo')
+    try:
+        if selected_view=='🔴 Red en vivo':
+            _live(con,cfg,gtfs,ncode,start,end,preset)
+        elif not gtfs:
+            st.info('Esta vista requiere la referencia GTFS estática.')
+        elif selected_view=='🗺️ Por núcleo':
+            _nuclei(con,ncode,start,end,preset)
+        else:
+            _trend(con,gtfs,ncode,start,end,preset)
+    finally:
+        con.close()

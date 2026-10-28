@@ -1,8 +1,7 @@
 """Tests del parser GTFS-RT.
 
-Usan ficheros .pb reales de data/raw/ como fixtures — sin mocks,
-porque queremos verificar que el parser funciona con los datos reales
-de Renfe, incluyendo los campos vacíos y las peculiaridades del feed.
+Usan mensajes sintéticos con el esquema y campos del feed. La reproducción
+de capturas reales se comprueba además en la vista de trazabilidad.
 """
 import pandas as pd
 import pytest
@@ -47,13 +46,13 @@ class TestParseVehiclePositions:
         df = parse_vehicle_positions(vp_pb)
         assert pd.api.types.is_integer_dtype(df["snapshot_ts"])
 
-    def test_snapshot_ts_is_recent(self, vp_pb):
-        """El feed debe tener un timestamp de los últimos 30 días."""
-        from datetime import datetime
+    def test_snapshot_ts_preserves_source_header(self, vp_pb):
+        """La antigüedad de un fixture no altera la fecha del proveedor."""
+        from google.transit import gtfs_realtime_pb2
+        feed=gtfs_realtime_pb2.FeedMessage()
+        feed.ParseFromString(vp_pb.read_bytes())
         df = parse_vehicle_positions(vp_pb)
-        ts = df["snapshot_ts"].iloc[0]
-        now = datetime.now(timezone.utc).timestamp()
-        assert now - ts < 30 * 24 * 3600, f"snapshot_ts demasiado antiguo: {ts}"
+        assert df['snapshot_ts'].eq(feed.header.timestamp).all()
 
     def test_ingested_at_is_tz_aware(self, vp_pb):
         df = parse_vehicle_positions(vp_pb)

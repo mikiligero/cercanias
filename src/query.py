@@ -1,215 +1,181 @@
-"""
-Capa de consulta DuckDB (in-memory).
-
-Uso típico:
-    from src.config import load
-    from src.query import build_connection, snapshot_summary, delays_by_trip
-    from src.query import punctuality_over_time, active_alerts
-
-    con = build_connection(load())
-    delays_by_trip(con).head(10)
-"""
-import logging
+"""Consultas de indicadores; los filtros analíticos nunca modifican el bruto."""
+import re
 import zipfile
 from pathlib import Path
-
 import duckdb
 import pandas as pd
 
-logger = logging.getLogger(__name__)
+DELAY_MIN_S, DELAY_MAX_S = -300, 7200
+FILTER_DESCRIPTION = ('Filtro del EDA: −5 a 120 min, incluidos. Los valores fuera del '
+                      'intervalo se conservan y se cuentan como excluidos del indicador.')
 
-# ---------------------------------------------------------------------------
-# Helpers internos
-# ---------------------------------------------------------------------------
 
-def _read_gtfs_csv(zip_path: Path, name: str) -> pd.DataFrame:
-    """Lee un fichero del ZIP estático limpiando los espacios de Renfe."""
-    with zipfile.ZipFile(zip_path) as zf:
-        with zf.open(name) as f:
+def delay_condition(alias='tu'):
+    return f'{alias}.arrival_delay BETWEEN {DELAY_MIN_S} AND {DELAY_MAX_S}'
+
+
+def nucleus_condition(ncode=None, alias='tu'):
+    if ncode is None:
+        return 'TRUE'
+    codes=list(ncode) if isinstance(ncode,(list,tuple)) else [ncode]
+    if not codes:
+        return 'FALSE'
+    if any(not re.fullmatch(r'\d+', str(code)) for code in codes):
+        raise ValueError('Código de núcleo no válido')
+    selected=','.join("'"+str(code)+"'" for code in codes)
+    return f"""EXISTS (SELECT 1 FROM trips t JOIN routes r ON t.route_id=r.route_id
+       WHERE trim({alias}.trip_id)=t.trip_id AND regexp_extract(r.route_id,'^(\\d+)T',1) IN ({selected}))"""
+
+
+def _read_gtfs_csv(zip_path, name):
+    with zipfile.ZipFile(zip_path) as z:
+        with z.open(name) as f:
             df = pd.read_csv(f, dtype=str)
     df.columns = df.columns.str.strip()
-    return df.apply(lambda c: c.str.strip() if c.dtype == "object" else c)
+    return df.apply(lambda c: c.str.strip() if c.dtype == 'object' else c)
 
 
-# ---------------------------------------------------------------------------
-# Conexión principal
-# ---------------------------------------------------------------------------
-
-def build_connection(cfg: dict) -> duckdb.DuckDBPyConnection:
-    """
-    Crea una conexión DuckDB in-memory con:
-      - Vistas sobre los Parquet de bronze (vehicle_positions, trip_updates, alerts)
-      - Tablas del GTFS estático registradas (trips, routes, stops)
-
-    Llámalo una vez al arrancar y reutiliza la conexión en todas las consultas.
-    """
-    bronze_dir = Path(cfg["storage"]["bronze_dir"])
-    zip_path   = Path(cfg["storage"]["raw_dir"]) / "gtfs_static" / "fomento_transit.zip"
-
+def build_connection(cfg):
+    """Conexión general para análisis explícitos del histórico completo."""
     con = duckdb.connect()
-
-    # --- Vistas sobre bronze (lectura lazy de Parquet) ---
-    for feed in ("vehicle_positions", "trip_updates", "alerts"):
-        pattern = str(bronze_dir / feed / "**" / "*.parquet")
-        con.execute(f"""
-            CREATE VIEW {feed} AS
-            SELECT * FROM read_parquet('{pattern}', hive_partitioning=true)
-        """)
-        count = con.execute(f"SELECT count(*) FROM {feed}").fetchone()[0]
-        logger.info("Vista '%s': %d filas", feed, count)
-
-    # --- Tablas GTFS estático (en memoria, leídas del ZIP) ---
-    if zip_path.exists():
-        trips  = _read_gtfs_csv(zip_path, "trips.txt")[["trip_id", "route_id", "service_id"]]
-        routes = _read_gtfs_csv(zip_path, "routes.txt")[["route_id", "route_short_name", "route_long_name"]]
-        stops  = _read_gtfs_csv(zip_path, "stops.txt")[["stop_id", "stop_name", "stop_lat", "stop_lon"]]
-
-        con.register("trips",  trips)
-        con.register("routes", routes)
-        con.register("stops",  stops)
-        logger.info("GTFS estático cargado: %d trips, %d routes, %d stops",
-                    len(trips), len(routes), len(stops))
-    else:
-        logger.warning("ZIP estático no encontrado en %s — joins enriquecidos no disponibles", zip_path)
-
-    return con
+    try:
+        con.execute("SET TimeZone='Europe/Madrid'")
+        for feed in ('vehicle_positions', 'trip_updates', 'alerts'):
+            pattern = str(Path(cfg['storage']['bronze_dir']) / feed / '**/*.parquet').replace("'", "''")
+            con.execute(f"CREATE VIEW {feed} AS SELECT * FROM read_parquet('{pattern}',hive_partitioning=true)")
+        path = Path(cfg['storage']['raw_dir']) / 'gtfs_static/fomento_transit.zip'
+        if path.exists():
+            for table, columns in (
+                ('trips', ['trip_id', 'route_id', 'service_id']),
+                ('routes', ['route_id', 'route_short_name', 'route_long_name']),
+                ('stops', ['stop_id', 'stop_name', 'stop_lat', 'stop_lon'])):
+                con.register(table, _read_gtfs_csv(path, table + '.txt')[columns])
+        return con
+    except Exception:
+        con.close()
+        raise
 
 
-# ---------------------------------------------------------------------------
-# Consultas
-# ---------------------------------------------------------------------------
+def snapshot_summary(con, ncode=None, filtered=True):
+    """Última captura original, sin retroceder si no quedan valores válidos.
 
-def snapshot_summary(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+    `trenes` se mantiene por compatibilidad: cuenta filas, no trenes.
+    Trazabilidad usa filtered=False para reproducir el archivo conservado.
     """
-    Estado de la red en el último snapshot de trip_updates.
-    Devuelve una fila con totales y métricas de retraso.
-    """
-    return con.execute("""
-        WITH latest AS (
-            SELECT max(snapshot_ts) AS ts FROM trip_updates
-        )
-        SELECT
-            strftime(to_timestamp(any_value(ts)), '%Y-%m-%d %H:%M:%S UTC') AS snapshot,
-            count(*)                                             AS trenes,
-            sum(CASE WHEN arrival_delay >  0 THEN 1 END)        AS con_retraso,
-            sum(CASE WHEN arrival_delay <= 0 THEN 1 END)        AS a_tiempo,
-            round(avg(CASE WHEN arrival_delay > 0
-                          THEN arrival_delay END) / 60.0, 1)    AS retraso_medio_min,
-            round(max(arrival_delay) / 60.0, 1)                 AS retraso_max_min
-        FROM trip_updates
-        JOIN latest ON snapshot_ts = ts
-        WHERE arrival_delay IS NOT NULL
-    """).df()
-
-
-def delays_by_trip(
-    con: duckdb.DuckDBPyConnection,
-    snapshot_ts: int | None = None,
-    min_delay_sec: int = 60,
-) -> pd.DataFrame:
-    """
-    Tabla de retrasos por tren, enriquecida con línea y nombre de parada.
-
-    Args:
-        snapshot_ts:    Epoch del snapshot a consultar. None = último disponible.
-        min_delay_sec:  Solo incluye trenes con retraso >= este valor (default 60s).
-
-    Devuelve columnas: linea, trip_id, parada, retraso_min, retraso_seg.
-    """
-    ts_filter = (
-        f"snapshot_ts = {snapshot_ts}"
-        if snapshot_ts
-        else "snapshot_ts = (SELECT max(snapshot_ts) FROM trip_updates)"
-    )
+    valid = delay_condition() if filtered else 'tu.arrival_delay IS NOT NULL'
     return con.execute(f"""
-        SELECT
-            r.route_short_name                  AS linea,
-            tu.trip_id,
-            s.stop_name                         AS parada,
-            round(tu.arrival_delay / 60.0, 1)  AS retraso_min,
-            tu.arrival_delay                    AS retraso_seg
-        FROM trip_updates tu
-        JOIN trips  t ON tu.trip_id = t.trip_id
-        JOIN routes r ON t.route_id = r.route_id
-        JOIN stops  s ON tu.stop_id = s.stop_id
-        WHERE {ts_filter}
-          AND tu.arrival_delay >= {min_delay_sec}
-        ORDER BY tu.arrival_delay DESC
+      WITH latest AS (SELECT max(snapshot_ts) ts FROM trip_updates),
+      scoped AS (SELECT tu.* FROM trip_updates tu JOIN latest ON tu.snapshot_ts=ts
+                 WHERE {nucleus_condition(ncode)})
+      SELECT (SELECT ts FROM latest) snapshot_ts,
+        (SELECT strftime(to_timestamp(ts), '%Y-%m-%d %H:%M:%S %Z') FROM latest) AS "snapshot",
+        count(*) total_observaciones,
+        count(*) FILTER(WHERE tu.arrival_delay IS NULL) sin_delay,
+        count(*) FILTER(WHERE tu.arrival_delay < {DELAY_MIN_S} OR tu.arrival_delay > {DELAY_MAX_S}) fuera_rango,
+        count(*) FILTER(WHERE {valid}) trenes,
+        count(DISTINCT tu.trip_id) FILTER(WHERE {valid}) viajes,
+        count(*) FILTER(WHERE {valid} AND tu.arrival_delay > 0) con_retraso,
+        count(*) FILTER(WHERE {valid} AND tu.arrival_delay <= 0) a_tiempo,
+        round(avg(tu.arrival_delay) FILTER(WHERE {valid} AND tu.arrival_delay > 0)/60.0,1) retraso_medio_min,
+        round(max(tu.arrival_delay) FILTER(WHERE {valid})/60.0,1) retraso_max_min
+      FROM scoped tu
     """).df()
 
 
-def punctuality_over_time(
-    con: duckdb.DuckDBPyConnection,
-    start_ts: int | None = None,
-    end_ts: int | None = None,
-) -> pd.DataFrame:
-    """
-    Serie temporal de puntualidad: una fila por snapshot.
-    Columnas: ts (timestamp), trenes, pct_puntual, retraso_medio_min.
-    """
-    ts_filter = ""
-    if start_ts is not None and end_ts is not None:
-        ts_filter = f"AND snapshot_ts BETWEEN {start_ts} AND {end_ts}"
-    return con.execute(f"""
-        SELECT
-            to_timestamp(snapshot_ts)                        AS ts,
-            count(*)                                         AS trenes,
-            round(100.0 * sum(CASE WHEN arrival_delay <= 0
-                                   THEN 1 ELSE 0 END)
-                        / count(*), 1)                       AS pct_puntual,
-            round(avg(arrival_delay) / 60.0, 1)             AS retraso_medio_min
-        FROM trip_updates
-        WHERE arrival_delay IS NOT NULL
-          {ts_filter}
-        GROUP BY snapshot_ts
-        ORDER BY snapshot_ts
-    """).df()
+def delay_audit(con, start_ts=None, end_ts=None, ncode=None):
+    period = (f'tu.snapshot_ts BETWEEN {int(start_ts)} AND {int(end_ts)}'
+              if start_ts is not None and end_ts is not None else
+              'tu.snapshot_ts=(SELECT max(snapshot_ts) FROM trip_updates)')
+    return con.execute(f"""SELECT count(*) total,
+        count(*) FILTER(WHERE tu.arrival_delay IS NULL) sin_delay,
+        count(*) FILTER(WHERE {delay_condition()}) validas,
+        count(*) FILTER(WHERE tu.arrival_delay < {DELAY_MIN_S} OR tu.arrival_delay > {DELAY_MAX_S}) excluidas
+        FROM trip_updates tu WHERE {period} AND {nucleus_condition(ncode)}""").df().iloc[0].to_dict()
 
 
-def active_alerts(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
-    """
-    Alertas activas en el último snapshot, con texto y rutas afectadas.
-    """
-    return con.execute("""
-        WITH latest AS (
-            SELECT max(snapshot_ts) AS ts FROM alerts
-        )
-        SELECT
-            entity_id,
-            informed_routes,
-            strftime(to_timestamp(active_start), '%Y-%m-%d %H:%M') AS desde,
-            description_text
-        FROM alerts
-        JOIN latest ON snapshot_ts = ts
-        ORDER BY active_start DESC
-    """).df()
+def delays_by_trip(con, snapshot_ts=None, min_delay_sec=60, ncode=None):
+    stamp = str(int(snapshot_ts)) if snapshot_ts is not None else '(SELECT max(snapshot_ts) FROM trip_updates)'
+    return con.execute(f"""SELECT r.route_short_name linea,tu.trip_id,s.stop_name parada,
+        round(tu.arrival_delay/60.0,1) retraso_min,tu.arrival_delay retraso_seg
+        FROM trip_updates tu JOIN trips t ON trim(tu.trip_id)=t.trip_id
+        JOIN routes r ON t.route_id=r.route_id LEFT JOIN stops s ON trim(tu.stop_id)=s.stop_id
+        WHERE tu.snapshot_ts={stamp} AND {delay_condition()}
+        AND tu.arrival_delay >= {int(min_delay_sec)} AND {nucleus_condition(ncode)}
+        ORDER BY tu.arrival_delay DESC""").df()
 
 
-def network_heatmap(
-    con: duckdb.DuckDBPyConnection,
-    start_ts: int | None = None,
-    end_ts: int | None = None,
-) -> pd.DataFrame:
-    """
-    Retraso medio por parada a lo largo del período seleccionado.
-    Útil para identificar los puntos negros de la red.
-    Devuelve: stop_name, stop_lat, stop_lon, n_observaciones, retraso_medio_min.
-    """
-    ts_filter = ""
-    if start_ts is not None and end_ts is not None:
-        ts_filter = f"AND tu.snapshot_ts BETWEEN {start_ts} AND {end_ts}"
-    return con.execute(f"""
-        SELECT
-            s.stop_name,
-            CAST(s.stop_lat AS DOUBLE) AS lat,
-            CAST(s.stop_lon AS DOUBLE) AS lon,
-            count(*)                                        AS n_obs,
-            round(avg(tu.arrival_delay) / 60.0, 1)         AS retraso_medio_min
-        FROM trip_updates tu
-        JOIN stops s ON tu.stop_id = s.stop_id
-        WHERE tu.arrival_delay IS NOT NULL
-          {ts_filter}
-        GROUP BY s.stop_name, s.stop_lat, s.stop_lon
-        HAVING count(*) >= 3
-        ORDER BY retraso_medio_min DESC
-    """).df()
+def punctuality_over_time(con, start_ts=None, end_ts=None, ncode=None):
+    period = f'AND tu.snapshot_ts BETWEEN {int(start_ts)} AND {int(end_ts)}' if start_ts is not None and end_ts is not None else ''
+    return con.execute(f"""SELECT to_timestamp(tu.snapshot_ts) ts,count(*) trenes,
+        round(100.0*count(*) FILTER(WHERE tu.arrival_delay<=0)/count(*),1) pct_puntual,
+        round(avg(tu.arrival_delay)/60.0,1) retraso_medio_min
+        FROM trip_updates tu WHERE {delay_condition()} AND {nucleus_condition(ncode)} {period}
+        GROUP BY tu.snapshot_ts ORDER BY tu.snapshot_ts""").df()
+
+
+def active_alerts(con, now_ts=None):
+    """Snapshots recientes y primer intervalo de vigencia conservado en Bronze."""
+    import time
+    now_ts = int(time.time() if now_ts is None else now_ts)
+    return con.execute("""WITH latest AS (SELECT max(snapshot_ts) ts FROM alerts)
+        SELECT entity_id,informed_routes,active_start,active_end,description_text
+        FROM alerts JOIN latest ON snapshot_ts=ts
+        WHERE ts BETWEEN ? AND ? AND (active_start IS NULL OR active_start<=?)
+          AND (active_end IS NULL OR active_end>?) ORDER BY active_start DESC""",
+        [now_ts-600, now_ts+60, now_ts, now_ts]).df()
+
+
+def network_heatmap(con, start_ts=None, end_ts=None, ncode=None):
+    period = f'AND tu.snapshot_ts BETWEEN {int(start_ts)} AND {int(end_ts)}' if start_ts is not None and end_ts is not None else ''
+    return con.execute(f"""SELECT s.stop_name,try_cast(s.stop_lat AS DOUBLE) lat,
+        try_cast(s.stop_lon AS DOUBLE) lon,count(*) n_obs,
+        round(avg(tu.arrival_delay)/60.0,1) retraso_medio_min
+        FROM trip_updates tu JOIN stops s ON trim(tu.stop_id)=s.stop_id
+        WHERE {delay_condition()} AND {nucleus_condition(ncode)} {period}
+        GROUP BY s.stop_name,s.stop_lat,s.stop_lon HAVING count(*)>=3
+        ORDER BY retraso_medio_min DESC""").df()
+
+
+def nucleus_current(con):
+    return con.execute(f"""WITH
+      latest_vp AS (SELECT max(snapshot_ts) ts FROM vehicle_positions),
+      latest_tu AS (SELECT max(snapshot_ts) ts FROM trip_updates),
+      positions AS (
+        SELECT r.nucleus_code ncode,count(DISTINCT vp.entity_id) circulando
+        FROM vehicle_positions vp JOIN latest_vp ON vp.snapshot_ts=latest_vp.ts
+        JOIN trips t ON trim(vp.trip_id)=t.trip_id JOIN routes r ON t.route_id=r.route_id
+        WHERE r.nucleus_code IS NOT NULL GROUP BY r.nucleus_code),
+      delays AS (
+        SELECT r.nucleus_code ncode,
+          round(max(tu.arrival_delay) FILTER(WHERE {delay_condition()})/60.0,1) max_min,
+          round(avg(tu.arrival_delay) FILTER(WHERE {delay_condition()})/60.0,1) media_min,
+          count(*) FILTER(WHERE {delay_condition()}) validas,
+          count(*) FILTER(WHERE tu.arrival_delay < {DELAY_MIN_S} OR tu.arrival_delay > {DELAY_MAX_S}) excluidas,
+          count(*) FILTER(WHERE tu.arrival_delay IS NULL) sin_delay
+        FROM trip_updates tu JOIN latest_tu ON tu.snapshot_ts=latest_tu.ts
+        JOIN trips t ON trim(tu.trip_id)=t.trip_id JOIN routes r ON t.route_id=r.route_id
+        WHERE r.nucleus_code IS NOT NULL GROUP BY r.nucleus_code)
+      SELECT coalesce(p.ncode,d.ncode) ncode,p.circulando,
+        d.max_min retraso_max_min,d.media_min retraso_medio_min,
+        coalesce(d.validas,0) validas,coalesce(d.excluidas,0) excluidas,coalesce(d.sin_delay,0) sin_delay
+      FROM positions p FULL OUTER JOIN delays d ON p.ncode=d.ncode
+      ORDER BY p.circulando DESC NULLS LAST""").df()
+
+
+def nucleus_history(con, start_ts, end_ts):
+    return con.execute(f"""SELECT to_timestamp(tu.snapshot_ts) ts,r.nucleus_code ncode,
+        count(*) n_obs,sum(tu.arrival_delay)/60.0 suma_min,
+        round(avg(tu.arrival_delay)/60.0,1) media_min,round(max(tu.arrival_delay)/60.0,1) max_min
+        FROM trip_updates tu JOIN trips t ON trim(tu.trip_id)=t.trip_id
+        JOIN routes r ON t.route_id=r.route_id WHERE {delay_condition()}
+        AND r.nucleus_code IS NOT NULL AND tu.snapshot_ts BETWEEN {int(start_ts)} AND {int(end_ts)}
+        GROUP BY tu.snapshot_ts,r.nucleus_code ORDER BY tu.snapshot_ts""").df()
+
+
+def nucleus_top_delays(con, ncode=None):
+    return con.execute(f"""SELECT r.nucleus_code ncode,r.route_short_name linea,tu.trip_id,
+        round(tu.arrival_delay/60.0,1) retraso_min FROM trip_updates tu
+        JOIN trips t ON trim(tu.trip_id)=t.trip_id JOIN routes r ON t.route_id=r.route_id
+        WHERE tu.snapshot_ts=(SELECT max(snapshot_ts) FROM trip_updates)
+        AND {delay_condition()} AND tu.arrival_delay>60 AND {nucleus_condition(ncode)}
+        ORDER BY tu.arrival_delay DESC LIMIT 20""").df()

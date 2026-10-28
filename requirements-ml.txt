@@ -1,0 +1,4 @@
+# Dependencias de la prueba de concepto; versiones comprobadas en el servidor.
+-r requirements.txt
+numpy==2.4.5
+scikit-learn==1.9.0

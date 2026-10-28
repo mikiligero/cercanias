@@ -1,7 +1,7 @@
 """Tests del FeedDownloader.
 
 Mockean la llamada HTTP para no depender de la red,
-pero usan .pb reales como payload de respuesta.
+con mensajes Protobuf sintéticos como respuesta.
 """
 import pytest
 from pathlib import Path
