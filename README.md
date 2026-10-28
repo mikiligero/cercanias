@@ -60,10 +60,20 @@ python main.py
 En otra terminal, con el mismo entorno:
 
 ```bash
-streamlit run dashboard.py
+python serve_dashboard.py
 ```
 
 La captura inicial prepara las fuentes estáticas. El dashboard necesita archivos Parquet de las tres fuentes. Los datos se guardan en `data/`, excluido del repositorio junto con cachés, estados, evidencias y copias de recuperación. Para reproducir cifras históricas hay que disponer del conjunto correspondiente y de su referencia GTFS; clonar el código no descarga todo el histórico.
+
+### Descargar el histórico
+
+La barra lateral incluye «Descargar datos». También se accede desde el menú de los tres puntos → About → Descargar datos almacenados, o desde [la página de descargas](https://cercanias.mikines.es/?pagina=descargas).
+
+Se eligen bruto `.pb`, Parquet o ambos, las fuentes y un período en fechas UTC. Los paquetes se organizan por día y conservan las rutas `data/raw/…` y `data/bronze/…`. Cada ZIP incluye instrucciones y un manifiesto de tamaños y SHA-256. El GTFS estático se descarga aparte como referencia disponible, sin atribuirlo a versiones históricas. Para varios días se ofrece un programa opcional de descarga secuencial.
+
+Descomprime los paquetes en la carpeta del proyecto, junto a `dashboard.py`, combinando sus carpetas `data/`. La guía [DESCARGAR_DATOS.md](DESCARGAR_DATOS.md) explica la estructura y el reprocesado local del bruto. Los paquetes contienen las fuentes completas conservadas, sin filtrar Madrid ni aplicar el filtro analítico de retrasos.
+
+`serve_dashboard.py` sirve las descargas por el mismo puerto del panel, sin duplicar el histórico en disco ni cargar ZIP enteros en memoria. Conserva las rutas de Streamlit y sus WebSockets. El arranque directo `streamlit run dashboard.py` mantiene el cuadro, pero no habilita el endpoint de descarga de conjuntos.
 
 Para generar o actualizar el inventario:
 

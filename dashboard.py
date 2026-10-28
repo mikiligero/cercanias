@@ -11,6 +11,8 @@ from src.config import load
 from src.pilot_view import render_pilot, _number
 from src.quality_view import render_quality
 from src.trace_view import render_trace
+from src.download_view import render_downloads
+from src.data_downloads import DOWNLOAD_PAGE_URL
 from src.alerts_view import render_alerts
 from src.dashboard_data import build_dashboard_connection
 from src.presentation import (MADRID, NUCLEUS_NAMES, PERIOD_OPTIONS, decimal,
@@ -22,7 +24,9 @@ from src.query import (FILTER_DESCRIPTION, snapshot_summary, delay_audit, delays
 VIEWS = ['📊 El piloto en cifras', '🔎 Del dato al indicador', '🔴 Red en vivo',
          '🗺️ Por núcleo', '📈 Tendencia del día', '⚙️ Sistema y calidad']
 LOGO = Path(__file__).resolve().parent/'assets/logo-anticipa.png'
-st.set_page_config(page_title='Anticipa · Cuadro de mando (prototipo)', page_icon='🚆', layout='wide')
+st.set_page_config(page_title='Anticipa · Cuadro de mando (prototipo)', page_icon='🚆', layout='wide',
+    menu_items={'Get Help':None,'Report a Bug':None,
+                'About':'### Anticipa · Cercanías Renfe\n\n[Descargar datos almacenados]('+DOWNLOAD_PAGE_URL+')\n\nSelecciona bruto o Parquet, fuentes y fechas. La página incluye instrucciones para colocar los archivos en el proyecto.'})
 
 
 @st.cache_resource
@@ -236,6 +240,11 @@ with brand:
 with heading:
     st.title('Cercanías Renfe')
     st.caption('Cuadro de mando del piloto Anticipa')
+if st.query_params.get('pagina')=='descargas':
+    with st.sidebar:
+        st.link_button('← Volver al cuadro de mando','/',use_container_width=True)
+    render_downloads(_load_cfg())
+    st.stop()
 selected_view = st.radio('Vista', VIEWS, horizontal=True, label_visibility='collapsed', key='selected_view')
 cfg = _load_cfg()
 analytical = selected_view in VIEWS[2:5]
@@ -247,6 +256,7 @@ if analytical:
         gtfs = _load_gtfs_static(cfg['storage']['raw_dir'], (stat.st_mtime_ns,stat.st_size))
 with st.sidebar:
     st.button('🔄 Actualizar datos',key='refresh_data',use_container_width=True)
+    st.link_button('📥 Descargar datos','?pagina=descargas',use_container_width=True)
     if analytical:
         st.header('Ámbito del piloto')
         codes = sorted(gtfs['routes']['nucleus_code'].dropna().unique()) if gtfs else []
