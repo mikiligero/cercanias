@@ -35,6 +35,10 @@ def export_rows(inv,formats,feeds,start,end):
     return sorted((row for row in result.values() if row['files']),key=lambda row:row['day'],reverse=True)
 
 
+def remember_custom_dates():
+    st.session_state['download_custom_dates']=st.session_state['download_period_simple']
+
+
 def render_downloads(cfg):
     st.header('Descargar datos')
     st.write('Elige el formato y las fechas. Se descargará un único ZIP con todo el período.')
@@ -56,9 +60,7 @@ def render_downloads(cfg):
         default_end=min(today_utc(),last)
         default_end=max(first,default_end)
         default_start=max(first,default_end-timedelta(days=6))
-        if 'download_period_simple' not in st.session_state:
-            st.session_state['download_period_simple']=st.session_state.get('download_custom_dates',(default_start,default_end))
-        selected=st.date_input('Desde / hasta',value=(),min_value=first,max_value=last,key='download_period_simple',format='DD/MM/YYYY')
+        selected=st.date_input('Desde / hasta',value=st.session_state.get('download_custom_dates',(default_start,default_end)),min_value=first,max_value=last,key='download_period_simple',format='DD/MM/YYYY',on_change=remember_custom_dates)
         st.session_state['download_custom_dates']=selected
     else:
         selected=preset_dates(period,today_utc())
