@@ -15,6 +15,7 @@ from src.download_view import render_downloads
 from src.data_downloads import DOWNLOAD_PAGE_URL
 from src.alerts_view import render_alerts
 from src.dashboard_data import build_dashboard_connection
+from src.query import current_snapshot_sql
 from src.presentation import (MADRID, NUCLEUS_NAMES, PERIOD_OPTIONS, decimal,
                               local_time, madrid_series, period_bounds)
 from src.query import (FILTER_DESCRIPTION, snapshot_summary, delay_audit, delays_by_trip,
@@ -80,21 +81,26 @@ def _plot(fig):
 
 def _live(con, cfg, gtfs, ncode, start, end, preset):
     summary = snapshot_summary(con, ncode).iloc[0]
-    st.subheader('Última captura · '+scope_name)
+    st.subheader('Última captura disponible · '+scope_name)
     a,b,c,d,e = st.columns(5)
-    a.metric('Observaciones evaluadas', _number(summary['trenes']))
-    b.metric('Con retraso positivo', _number(summary['con_retraso']))
-    c.metric('Sin retraso (≤0 s)', _number(summary['a_tiempo']))
+    available=bool(summary['total_observaciones'])
+    a.metric('Observaciones evaluadas', _number(summary['trenes']) if available else 'Sin datos')
+    b.metric('Con retraso positivo', _number(summary['con_retraso']) if available else 'Sin datos')
+    c.metric('Sin retraso (≤0 s)', _number(summary['a_tiempo']) if available else 'Sin datos')
     d.metric('Media con retraso positivo', decimal(summary['retraso_medio_min'], ' min'))
     e.metric('Máximo incluido', decimal(summary['retraso_max_min'], ' min'))
     stamp = summary['snapshot_ts']
+    stamp = None if pd.isna(stamp) else stamp
     st.caption('Dato generado el '+local_time(stamp)+' (Madrid). '+
                _number(summary['viajes'])+' identificadores de viaje distintos entre las observaciones evaluadas.')
+    latest=con.execute('SELECT max(snapshot_ts) FROM trip_updates').fetchone()[0]
+    if ncode and stamp is not None and stamp!=latest:
+        st.info('La captura más reciente de la red no incluye este núcleo. Se muestra su última captura disponible, con la fecha indicada; se consultan como máximo los diez minutos anteriores al último mensaje.')
     if pd.notna(stamp) and datetime.now(MADRID).timestamp()-float(stamp)>120:
         st.warning('El último dato de actualizaciones tiene más de dos minutos. Comprueba la fuente en Sistema y calidad.')
     _audit(con, ncode=ncode)
     if not summary['trenes']:
-        st.info('No hay observaciones evaluables en la última captura para este ámbito. Las métricas sin datos no se sustituyen por cero.')
+        st.info('No hay observaciones evaluables en la última captura disponible para este ámbito. Si el núcleo no aparece en los últimos diez minutos del feed, se muestra «Sin datos».')
     st.divider()
     st.subheader('Observaciones de retraso · '+preset)
     left,right = st.columns([1,3])
@@ -109,7 +115,8 @@ def _live(con, cfg, gtfs, ncode, start, end, preset):
         if gtfs:
             period_con = build_dashboard_connection(cfg, gtfs, start, end, period_latest=True)
             try:
-                stamp = period_con.execute('SELECT max(snapshot_ts) FROM trip_updates WHERE snapshot_ts BETWEEN ? AND ?', [start,end]).fetchone()[0]
+                stamp = period_con.execute(f'SELECT {current_snapshot_sql(ncode)}').fetchone()[0]
+                if stamp is not None and not start<=stamp<=end:stamp=None
                 if stamp is None:
                     st.info('No hay capturas en el período seleccionado.')
                 else:
@@ -153,7 +160,12 @@ def _nuclei(con, ncode, start, end, preset):
                   <b>Máximo incluido:</b> {decimal(row['retraso_max_min'],' min')}<br>
                   <small>{_number(row['validas'])} observaciones incluidas · {_number(row['excluidas'])} fuera del filtro · {_number(row['sin_delay'])} sin retraso informado</small>
                   </div>''', unsafe_allow_html=True)
-    st.caption('Vehículos: entidades distintas del último mensaje de posiciones que cruzan con GTFS. Las medias de retraso cuentan observaciones de parada; pueden incluir adelantos. Las capturas de posiciones y retrasos pueden tener fechas distintas.')
+                for label,key in (('Posiciones','positions_ts'),('Retrasos','delays_ts')):
+                    stamp=None if pd.isna(row[key]) else row[key]
+                    st.caption(label+': '+local_time(stamp)+' (Madrid)')
+                    if stamp is not None and datetime.now(MADRID).timestamp()-stamp>120:
+                        st.warning(label+': dato de más de dos minutos.')
+    st.caption('Se usa la última captura disponible de cada núcleo, dentro de los diez minutos anteriores al último mensaje de cada fuente. Vehículos: entidades distintas que cruzan con GTFS. Las medias cuentan observaciones de parada; pueden incluir adelantos. Las fechas de posiciones y retrasos se indican por separado.')
     _audit(con, ncode=ncode)
     st.divider()
     st.subheader('Comparación histórica · '+preset)
@@ -274,7 +286,7 @@ with st.sidebar:
                 st.info('Selecciona las fechas inicial y final.');st.stop()
         start,end = period_bounds(preset,chosen)
         st.caption(local_time(start,'%d/%m %H:%M')+' → '+local_time(end,'%d/%m %H:%M')+' · Madrid')
-        st.caption('El núcleo se aplica a las métricas, tablas y mapa. El período afecta al histórico; el estado actual usa la última captura.')
+        st.caption('El núcleo se aplica a las métricas, tablas y mapa. El período afecta al histórico; el estado actual usa la última captura disponible del núcleo, con su fecha.')
     else:
         st.caption('Esta vista conserva su propio ámbito y filtros. El inventario cubre toda la red capturada; el ejemplo preparado sigue una observación de Madrid.')
 if selected_view!='📊 El piloto en cifras':
