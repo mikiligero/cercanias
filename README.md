@@ -12,7 +12,7 @@ Este repositorio contiene el código del piloto desarrollado como parte del **Tr
 
 ## Piloto y demostración
 
-**Demo:** [cercanias.mikines.es](https://cercanias.mikines.es/). Es un prototipo académico. Los retrasos mostrados son estimaciones del proveedor; no acreditan llegadas reales ni resultados de un modelo predictivo de Anticipa.
+**Demo:** [anticipa.mikines.es](https://anticipa.mikines.es/). Es un prototipo académico. Los retrasos mostrados son estimaciones del proveedor; no acreditan llegadas reales ni resultados de un modelo predictivo de Anticipa.
 
 ![Red en vivo del piloto Anticipa, con Madrid seleccionado](assets/cuadro-de-mando.png)
 
@@ -77,7 +77,7 @@ La captura inicial prepara las fuentes estáticas. El dashboard necesita archivo
 
 ### Descargar el histórico
 
-La barra lateral incluye «Descargar datos». También se accede desde el menú de los tres puntos → About → Descargar datos almacenados, o desde [la página de descargas](https://cercanias.mikines.es/?pagina=descargas).
+La barra lateral incluye «Descargar datos». También se accede desde el menú de los tres puntos → About → Descargar datos almacenados, o desde [la página de descargas](https://anticipa.mikines.es/?pagina=descargas).
 
 Se eligen el formato (bruto `.pb`, Parquet o ambos) y el período: hoy, últimos 7 días, últimos 30 días, piloto EDA (17/05/2026–03/07/2026) o fechas personalizadas. Los días de descarga son UTC. Un único botón descarga **todo el período en un ZIP**, conservando las rutas `data/raw/…` y `data/bronze/…`. Por defecto se incluyen todas las fuentes y una sola copia del GTFS disponible. Las fuentes y la referencia se pueden ajustar en un apartado desplegable. El ZIP incluye las instrucciones y un manifiesto de tamaños y SHA-256.
 

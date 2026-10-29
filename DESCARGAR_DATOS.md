@@ -2,7 +2,7 @@
 
 ## Elegir y obtener los archivos
 
-Abre [Descargar datos almacenados](https://cercanias.mikines.es/?pagina=descargas), la opción «Descargar datos» de la barra lateral o el enlace del menú ⋮ → About.
+Abre [Descargar datos almacenados](https://anticipa.mikines.es/?pagina=descargas), la opción «Descargar datos» de la barra lateral o el enlace del menú ⋮ → About.
 
 1. Elige bruto `.pb`, Parquet o ambos.
 2. Elige **Hoy**, **Última semana** (7 días, incluido hoy), **Último mes** (30 días, incluido hoy) o **Datos piloto EDA** (17/05/2026–03/07/2026). Usa **Personalizado** para indicar otras fechas. Los días son UTC, igual que las carpetas conservadas; el día en curso es parcial. Solo se incluyen los archivos conservados dentro del intervalo elegido.

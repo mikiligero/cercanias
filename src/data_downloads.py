@@ -17,7 +17,7 @@ from itertools import chain
 
 FEEDS = ('vehicle_positions', 'trip_updates', 'alerts')
 FORMATS = ('raw', 'parquet')
-PUBLIC_BASE = 'https://cercanias.mikines.es'
+PUBLIC_BASE = 'https://anticipa.mikines.es'
 DOWNLOAD_PAGE_URL = PUBLIC_BASE + '/?pagina=descargas'
 ENDPOINT = '/_anticipa/datos'
 MAX_FILES = 40000
