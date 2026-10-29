@@ -1,6 +1,16 @@
 # Anticipa · Piloto de datos de Cercanías
 
-Anticipa es un proyecto de TFM para explorar la captura, conservación y análisis de información de Cercanías Renfe. El cuadro de mando permite revisar el estado publicado por Renfe y demostrar cómo una observación pasa del mensaje original al indicador.
+Este repositorio contiene el código del piloto desarrollado como parte del **Trabajo Fin de Máster (TFM) del proyecto Anticipa: Plataforma de Monitorización de la Red de Cercanías**. Incluye la captura, conservación y análisis de información de Cercanías Renfe y un cuadro de mando para revisar el estado publicado por Renfe y demostrar cómo una observación pasa del mensaje original al indicador.
+
+## Integrantes del proyecto
+
+- Benito García
+- Miguel Ligero García-Morato
+- Erasmo Javier Bello Gerez
+- María Martín Bru
+- José María Cortés Céspedes
+
+## Piloto y demostración
 
 **Demo:** [cercanias.mikines.es](https://cercanias.mikines.es/). Es un prototipo académico. Los retrasos mostrados son estimaciones del proveedor; no acreditan llegadas reales ni resultados de un modelo predictivo de Anticipa.
 
